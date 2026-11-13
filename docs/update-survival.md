@@ -18,7 +18,7 @@ Read from `steamos-customizations-jupiter-3.9.20261021.1`
 |---|---|---|---|
 | `esp` | `/esp` | shared | `steamcl.efi` chainloader, `/esp/SteamOS/conf/{A,B}.conf` (`holo-bootconf`) |
 | `efi-A`, `efi-B` | `/efi` | **per slot** | stage-2 GRUB: `/efi/EFI/steamos/grubx64.efi` and `grub.cfg` (kernel cmdline + initrd list) |
-| `rootfs-A`, `rootfs-B` | `/` | **per slot** | read-only image, `/boot/vmlinuz-linux-neptune`, `/boot/initramfs-linux-neptune.img` |
+| `rootfs-A`, `rootfs-B` | `/` | **per slot** | read-only image, `/boot/vmlinuz-linux-neptune-72`, `/boot/initramfs-linux-neptune-72.img` (named after the kernel package) |
 | `var-A`, `var-B` | `/var` | **per slot** | holds the `/etc` overlay upper dir `/var/lib/overlays/etc/upper` |
 | `home` | `/home` | shared | everything else; `/opt`, `/var/log`, … are offloaded here |
 

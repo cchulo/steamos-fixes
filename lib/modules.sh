@@ -41,8 +41,11 @@ SOF_MODULES_RELEASE_URL="${SOF_MODULES_RELEASE_URL:-https://github.com/cchulo/${
 # release's artifact may be built from other patches and would be refused.
 SOF_MODULES_RELEASE_BASE="${SOF_MODULES_RELEASE_BASE:-https://github.com/cchulo/${SOF_NAME}/releases/download}"
 # The stock initramfs of a slot and our early-initrd override next to the
-# slot's grub.cfg (see "modules loaded from the initramfs" below).
-SOF_INITRAMFS_REL="${SOF_INITRAMFS_REL:-/boot/initramfs-linux-neptune.img}"
+# slot's grub.cfg (see "modules loaded from the initramfs" below). The
+# initramfs is named after the kernel package: initramfs-linux-neptune-72.img
+# on SteamOS 3.9 (measured on a Steam Machine), initramfs-linux-neptune.img
+# on older images; SOF_INITRAMFS_REL pins it, otherwise it is found by glob.
+SOF_INITRAMFS_REL="${SOF_INITRAMFS_REL:-}"
 SOF_OVERRIDE_INITRD_REL="${SLOTS_GRUB_DIR_REL}/${SOF_NAME}-modules.img"
 export SOF_MODULES_REL SOF_MODULES_CACHE_REL SOF_HELPER_REL SOF_MODPROBE_CONF_REL
 export SOF_INITRAMFS_REL SOF_OVERRIDE_INITRD_REL
@@ -610,10 +613,34 @@ modules_resolve() {
 # boot entry (lib/slots.sh): the kernel extracts the archives in order, so
 # our file replaces the stock one at the same path before udev loads it.
 
-# modules_initramfs_file : the root-relative stock initramfs, if present.
+# modules_initramfs_file [kver] : the root-relative stock initramfs, if
+# present: SOF_INITRAMFS_REL, else /boot/initramfs-linux-neptune*.img,
+# preferring the one whose suffix matches the kernel flavour (neptune-72)
+# when several exist.
 modules_initramfs_file() {
-    [ -f "$(sof_path "$SOF_INITRAMFS_REL")" ] || return 1
-    printf '%s\n' "$SOF_INITRAMFS_REL"
+    local kver=${1:-} flavour="" f best=""
+    if [ -n "$SOF_INITRAMFS_REL" ]; then
+        [ -f "$(sof_path "$SOF_INITRAMFS_REL")" ] || return 1
+        printf '%s\n' "$SOF_INITRAMFS_REL"
+        return 0
+    fi
+    [ -n "$kver" ] || kver=$(probe_running_kver 2>/dev/null || true)
+    # 7.2.7-valve2-2-neptune-72-g... -> neptune-72
+    flavour=$(printf '%s' "$kver" | sed -n 's/.*-\(neptune[-0-9]*\)\(-g[0-9a-f]*\)\{0,1\}$/\1/p')
+    for f in "$(sof_path /boot)"/initramfs-linux-neptune*.img; do
+        [ -f "$f" ] || continue
+        f=${f#"$SOF_ROOT"}
+        case "$f" in
+            *-fallback.img) continue ;;
+        esac
+        if [ -n "$flavour" ] && [ "$f" = "/boot/initramfs-linux-$flavour.img" ]; then
+            printf '%s\n' "$f"
+            return 0
+        fi
+        [ -n "$best" ] || best=$f
+    done
+    [ -n "$best" ] || return 1
+    printf '%s\n' "$best"
 }
 
 # _modules_decompress <file> : the archive on stdout, whatever it is

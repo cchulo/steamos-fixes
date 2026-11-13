@@ -279,9 +279,10 @@ M
 # --- modules in the initramfs: detection and the early initrd override ----
 
 # fixture_initramfs [member...] : a zstd-compressed newc cpio at
-# /boot/initramfs-linux-neptune.img holding the given member paths.
+# /boot/initramfs-linux-neptune-72.img (SteamOS 3.9 names it after the
+# kernel package) holding the given member paths. INITRAMFS_NAME overrides.
 fixture_initramfs() {
-    local tree="$BATS_TEST_TMPDIR/initramfs-tree" m fmt
+    local tree="$BATS_TEST_TMPDIR/initramfs-tree" m fmt name=${INITRAMFS_NAME:-initramfs-linux-neptune-72.img}
     rm -rf "$tree"
     mkdir -p "$tree/usr/lib/modules/$KV/kernel/drivers/hid" "$tree/etc/modprobe.d"
     printf 'stock\n' >"$tree/etc/modprobe.d/stock.conf"
@@ -292,13 +293,33 @@ fixture_initramfs() {
     if cpio --version 2>/dev/null | grep -qi gnu; then fmt="-H newc"; else fmt="--format newc"; fi
     mkdir -p "$SOF_ROOT/boot"
     # shellcheck disable=SC2086
-    (cd "$tree" && find . -type f | sort | cpio -o $fmt --quiet 2>/dev/null) | zstd -q -o "$SOF_ROOT/boot/initramfs-linux-neptune.img" -f
+    (cd "$tree" && find . -type f | sort | cpio -o $fmt --quiet 2>/dev/null) | zstd -q -o "$SOF_ROOT/boot/$name" -f
+}
+
+@test "the stock initramfs is found by name: pinned, flavour match, older name, never the fallback image" {
+    command -v cpio >/dev/null 2>&1 || skip "cpio not installed"
+    ! modules_initramfs_file || false
+    fixture_initramfs
+    [ "$(modules_initramfs_file)" = /boot/initramfs-linux-neptune-72.img ]
+    INITRAMFS_NAME=initramfs-linux-neptune-72-fallback.img fixture_initramfs
+    INITRAMFS_NAME=initramfs-linux-neptune-73.img fixture_initramfs
+    [ "$(modules_initramfs_file)" = /boot/initramfs-linux-neptune-72.img ]
+    [ "$(modules_initramfs_file 7.3.1-valve1-1-neptune-73-g205189b410aa)" = /boot/initramfs-linux-neptune-73.img ]
+    rm -f "$SOF_ROOT"/boot/initramfs-linux-neptune-7*.img
+    INITRAMFS_NAME=initramfs-linux-neptune.img fixture_initramfs
+    [ "$(modules_initramfs_file)" = /boot/initramfs-linux-neptune.img ]
+    SOF_INITRAMFS_REL=/boot/other.img run modules_initramfs_file
+    assert_failure
+    cp "$SOF_ROOT/boot/initramfs-linux-neptune.img" "$SOF_ROOT/boot/other.img"
+    SOF_INITRAMFS_REL=/boot/other.img run modules_initramfs_file
+    assert_success
+    [ "$output" = /boot/other.img ]
 }
 
 @test "modules_initramfs_list reads a zstd newc initramfs; modules_in_initramfs finds a module by either name spelling" {
     command -v cpio >/dev/null 2>&1 || skip "cpio not installed"
     fixture_initramfs "usr/lib/modules/$KV/kernel/drivers/hid/hid-asus-ally.ko.zst"
-    run modules_initramfs_list "$SOF_ROOT/boot/initramfs-linux-neptune.img"
+    run modules_initramfs_list "$SOF_ROOT/boot/initramfs-linux-neptune-72.img"
     assert_success
     assert_output_contains "etc/modprobe.d/stock.conf"
     run modules_in_initramfs hid_asus_ally
@@ -308,7 +329,7 @@ fixture_initramfs() {
     [ "$status" -eq 1 ]
     [ "$(modules_load_path hid-asus-ally)" = early-initrd ]
     [ "$(modules_load_path snd-soc-acpi-amd-match)" = modprobe-hook ]
-    rm -f "$SOF_ROOT/boot/initramfs-linux-neptune.img"
+    rm -f "$SOF_ROOT/boot/initramfs-linux-neptune-72.img"
     run modules_in_initramfs hid-asus-ally
     [ "$status" -eq 2 ]
     [ "$(modules_load_path hid-asus-ally)" = modprobe-hook ]

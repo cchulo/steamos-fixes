@@ -151,7 +151,7 @@ Details: [update-survival.md](../update-survival.md).
 Written down here when done (nothing below is assumed in the code; the
 component adapts to either answer where it can):
 
-- `lsinitcpio -l /boot/initramfs-linux-neptune.img | grep amdgpu`: whether
+- `lsinitcpio -l /boot/initramfs-linux-neptune-72.img | grep amdgpu`: whether
   the initramfs loads amdgpu. The `steam-deck` initcpio hook of
   `steamos-customizations` 3.9 lists no amdgpu and there is no `kms` hook,
   so the expectation is "no" and the modprobe hook path is used; if "yes",

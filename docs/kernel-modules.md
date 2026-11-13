@@ -57,7 +57,7 @@ the `steam-deck` hook lists storage, USB, HID and Deck platform modules,
 is therefore that amdgpu loads from the root filesystem and the hook works.
 
 **Measured on the Steam Machine:** `TODO(hw)` — run
-`lsinitcpio -l /boot/initramfs-linux-neptune.img | grep -c amdgpu` and
+`lsinitcpio -l /boot/initramfs-linux-neptune-72.img | grep -c amdgpu` and
 record the answer here.
 
 The component does not rely on the expectation. At apply time it lists the
