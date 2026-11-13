@@ -617,6 +617,7 @@ modules_resolve() {
 # present: SOF_INITRAMFS_REL, else /boot/initramfs-linux-neptune*.img,
 # preferring the one whose suffix matches the kernel flavour (neptune-72)
 # when several exist.
+# shellcheck disable=SC2120  # the kver argument is optional
 modules_initramfs_file() {
     local kver=${1:-} flavour="" f best=""
     if [ -n "$SOF_INITRAMFS_REL" ]; then
