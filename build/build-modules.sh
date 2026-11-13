@@ -995,9 +995,17 @@ bm_include_overlay() {
 # module the directory's Makefile configures. Patched headers go ahead of the
 # kernel's include/ through NOSTDINC_FLAGS, the only flags kbuild puts before
 # LINUXINCLUDE; the top Makefile sets it to just -nostdinc.
+#
+# KCPPFLAGS adds <tree>/.sof/inc (an empty directory, see bm_build_mdirs) as a
+# last include path: tracepoint headers set TRACE_INCLUDE_PATH to a path
+# relative to the kernel tree (amdgpu_trace.h: ../../drivers/gpu/drm/amd/amdgpu),
+# which include/trace/define_trace.h resolves against the headers package,
+# where the driver sources do not exist. With that -I, the same relative
+# path resolves to <tree>/drivers/... (measured: CI build of amdgpu failed
+# on amdgpu_trace_points.o without it).
 bm_make_args() {
     local k
-    printf '%s\n' -C "$BM_HEADERS_DIR" "M=$1/$2" "-j$JOBS"
+    printf '%s\n' -C "$BM_HEADERS_DIR" "M=$1/$2" "-j$JOBS" "KCPPFLAGS=-I$1/.sof/inc"
     [ -z "${BM_INCLUDE_OVERLAY:-}" ] || printf '%s\n' "NOSTDINC_FLAGS=-nostdinc -I$BM_INCLUDE_OVERLAY"
     for k in $(printf '%s\n' "$BM_ENTRIES" | bm_kos_for_mdir "$2"); do
         bm_is_superseded "$k" || printf '%s.ko\n' "$k"
@@ -1006,6 +1014,7 @@ bm_make_args() {
 
 bm_build_mdirs() {
     local tree=$1 m old_ifs
+    mkdir -p "$tree/.sof/inc" || bm_die "cannot create $tree/.sof/inc"
     for m in $(printf '%s\n' "$BM_ENTRIES" | bm_entries_column 2); do
         bm_mdir_needed "$m" || continue
         bm_log "make M=$m $(printf '%s\n' "$BM_ENTRIES" | bm_kos_for_mdir "$m" | tr '\n' ' ')"

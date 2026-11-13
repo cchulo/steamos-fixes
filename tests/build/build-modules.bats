@@ -575,9 +575,12 @@ make_patch() {
     bm_apply_patches "$tree"
     [ "$BM_INCLUDE_OVERLAY" = "$tree.include" ]
     [ "$(cat "$tree.include/sound/soc_sdw_utils.h")" = "struct new" ]
-    [ "$(bm_make_args "$tree" sound/soc/amd/acp | tr '\n' '|')" = "-C|/hdr|M=$tree/sound/soc/amd/acp|-j2|NOSTDINC_FLAGS=-nostdinc -I$tree.include|snd-acp-sdw-legacy-mach.ko|snd-acp-sdw-sof-mach.ko|" ]
+    [ "$(bm_make_args "$tree" sound/soc/amd/acp | tr '\n' '|')" = "-C|/hdr|M=$tree/sound/soc/amd/acp|-j2|KCPPFLAGS=-I$tree/.sof/inc|NOSTDINC_FLAGS=-nostdinc -I$tree.include|snd-acp-sdw-legacy-mach.ko|snd-acp-sdw-sof-mach.ko|" ]
     bm_make() { printf '%s\n' "$@" >>"$BATS_TEST_TMPDIR/make.log"; }
     bm_build_mdirs "$tree"
+    # the relative TRACE_INCLUDE_PATH of amdgpu resolves through that directory
+    [ -d "$tree/.sof/inc" ]
+    [ "$(cd "$tree/.sof/inc/../.." && pwd)" = "$(cd "$tree" && pwd)" ]
     grep -qx "M=$tree/sound/soc/sdw_utils" "$BATS_TEST_TMPDIR/make.log"
     grep -qx 'snd-soc-sdw-utils.ko' "$BATS_TEST_TMPDIR/make.log"
     [ "$(grep -c '^NOSTDINC_FLAGS=' "$BATS_TEST_TMPDIR/make.log")" -eq 2 ]
@@ -587,5 +590,5 @@ make_patch() {
     printf '0010-hid.patch\tdrivers/hid\thid-asus-ally.ko\n' >"$PATCHES_DIR/modules-hid.list"
     BM_ENTRIES=$(bm_list_entries "$PATCHES_DIR")
     BM_INCLUDE_OVERLAY="" BM_SUPERSEDED="" BM_HEADERS_DIR=/hdr JOBS=1
-    [ "$(bm_make_args /t drivers/hid | tr '\n' '|')" = "-C|/hdr|M=/t/drivers/hid|-j1|hid-asus-ally.ko|" ]
+    [ "$(bm_make_args /t drivers/hid | tr '\n' '|')" = "-C|/hdr|M=/t/drivers/hid|-j1|KCPPFLAGS=-I/t/.sof/inc|hid-asus-ally.ko|" ]
 }
