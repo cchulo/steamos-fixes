@@ -64,3 +64,14 @@ setup() {
     [ "$(component_status update)" = active ]
     [ "$(manifest_paths update | grep -c "$KEEP")" = 1 ]
 }
+
+@test "keep-list patterns are never glob-expanded against the host filesystem" {
+    # on a host whose /etc/systemd/system has real units, an unquoted pattern
+    # would expand to them and our unit would be reported as uncovered
+    printf 'x\n' >"$BATS_TEST_TMPDIR/f"
+    manifest_install_file "$BATS_TEST_TMPDIR/f" /etc/systemd/system/steamos-fixes-demo.service update
+    manifest_install_file "$BATS_TEST_TMPDIR/f" /etc/modprobe.d/steamos-fixes-demo.conf modules
+    run bash -c 'cd / && . "$1/lib/common.sh" && . "$1/lib/component.sh" && component_load update && update_keep_uncovered' _ "$REPO_ROOT"
+    assert_success
+    [ -z "$output" ]
+}

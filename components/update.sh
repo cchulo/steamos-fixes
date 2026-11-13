@@ -63,25 +63,40 @@ _update_keep_regex() {
     printf '^%s$\n' "$1" | sed -e 's/[.]/\\./g' -e 's/\*\*/\\001/g' -e 's/\*/[^\/]*/g' -e 's/\\001/.*/g'
 }
 
+# _update_keep_all_patterns : ours plus the entries of SteamOS's own keep
+# list that our units rely on.
+_update_keep_all_patterns() {
+    update_keep_patterns
+    printf '%s\n' '/etc/systemd/system/*.service' '/etc/systemd/system/*.wants/**' '/etc/systemd/system/*.service.d/**'
+}
+
 # update_keep_uncovered : manifest paths under /etc that no pattern covers
-# (excluding /etc/rauc and the keep list itself), one per line.
+# (excluding /etc/rauc and the keep list itself), one per line. Patterns
+# and paths are read line by line, never word-split: an unquoted
+# "/etc/systemd/system/*.service" would be expanded by the shell against
+# the host's real /etc (it was, on a Linux CI runner).
 update_keep_uncovered() {
     local p g re covered
-    for p in $(manifest_entries | _manifest_select kind file | _manifest_field path) \
-        $(manifest_entries | _manifest_select kind symlink | _manifest_field path); do
+    {
+        manifest_entries | _manifest_select kind file | _manifest_field path
+        manifest_entries | _manifest_select kind symlink | _manifest_field path
+    } | while IFS= read -r p; do
         case "$p" in
             /etc/rauc/* | "$UPDATE_KEEP_REL") continue ;;
             /etc/*) ;;
             *) continue ;;
         esac
         covered=0
-        for g in $(update_keep_patterns) /etc/systemd/system/*.service '/etc/systemd/system/*.wants/**' '/etc/systemd/system/*.service.d/**'; do
+        while IFS= read -r g; do
+            [ -n "$g" ] || continue
             re=$(_update_keep_regex "$g")
             if printf '%s\n' "$p" | grep -Eq -- "$re"; then
                 covered=1
                 break
             fi
-        done
+        done <<EOF
+$(_update_keep_all_patterns)
+EOF
         [ "$covered" = 1 ] || printf '%s\n' "$p"
     done | sort -u
 }
