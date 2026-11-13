@@ -42,7 +42,7 @@ jobs:
       - name: Install tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bats shellcheck shfmt jq python3-pytest zstd
+          sudo apt-get install -y --no-install-recommends bats shellcheck shfmt jq zstd cpio
       - name: Lint (shellcheck, shfmt, SPDX)
         run: make lint
       - name: VM tooling unit tests
