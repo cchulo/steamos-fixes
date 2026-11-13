@@ -146,21 +146,23 @@ Details: [update-survival.md](../update-survival.md).
 - What is actually driven (bpc, mode) is gamescope's choice through the
   connector's `max bpc`; the fix only makes the link capable of it.
 
-## Still to measure on a Steam Machine
+## Measured on the owner's Steam Machine (stock, before the fix)
 
-Written down here when done (nothing below is assumed in the code; the
-component adapts to either answer where it can):
+SteamOS 3.9.5 (build 20261023.100), kernel
+`7.2.7-valve2-2-neptune-72-g31504582a073`, 2026-11-13:
 
-- `lsinitcpio -l /boot/initramfs-linux-neptune-72.img | grep amdgpu`: whether
-  the initramfs loads amdgpu. The `steam-deck` initcpio hook of
-  `steamos-customizations` 3.9 lists no amdgpu and there is no `kms` hook,
-  so the expectation is "no" and the modprobe hook path is used; if "yes",
-  `modules` switches to the early initrd override automatically and
-  `status` reports `amdgpu: early initrd`.
-- `grep -n grub.d /usr/bin/grub-mkconfig /etc/default/grub` and
-  `ls /etc/default/grub.d`: that SteamOS's `update-grub` honours the
-  drop-in directory (beaglemoo relies on it on 3.9.5).
-- `cat /sys/kernel/security/lockdown`, `cat /sys/module/amdgpu/parameters/dcfeaturemask`
-  on stock: expected `[none]` and `2`.
-- The measured link after the fix: `vrr_range`, mode, bpc, `amdgpu taint`.
-- [etc-survival.md](../etc-survival.md) across a real update.
+| fact | value | consequence |
+|---|---|---|
+| amdgpu in the initramfs | no (`lsinitcpio` count 0; the image has no amdgpu and no related modprobe.d) | the modprobe hook loads our build; the early initrd override stays dormant |
+| `grub-mkconfig` sources `/etc/default/grub.d/*.cfg` | yes (`/usr/bin/grub-mkconfig` line 163); the directory does not exist on stock | the drop-in mechanism works; we create the directory |
+| kernel lockdown | `[none]` | unsigned module can load |
+| `dcfeaturemask` default | `2` | FRL off, as in Valve's 7.2.7 source |
+| HDMI connectors | `card0-HDMI-A-1` connected, `card0-HDMI-A-2` and `card1-HDMI-A-3` disconnected; both cards driven by `amdgpu` (`0000:03:00.0` discrete, `0000:0f:00.0` APU) | the fix applies; status reports the live connector |
+| stock link (TMDS) | `vrr_range` 48–120, `amdgpu_current_bpc` 8, preferred mode 3840x2160 | the baseline the fix must beat: 4K120 4:4:4 10/12-bit or 4K144 with VRR |
+| debugfs layout | each card under `/sys/kernel/debug/dri/<pci slot>` with `0`/`128` aliases | `hdmi-frl status` reads one directory per card |
+| stock `amdgpu.ko.zst` | 5.5 MB; efi partition 64 MB with 63 MB free | an override image would fit, should it ever be needed |
+| tools | `holo-chroot`, `holo-readonly`, `holo-bootconf`, `update-grub` present | the names the code uses |
+
+Still to measure, after the fix is installed: `vrr_range`, mode and bpc on
+the FRL link, `amdgpu taint`, and [etc-survival.md](../etc-survival.md)
+across a real update.

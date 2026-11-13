@@ -14,6 +14,24 @@ _hdmi_frl_usage() {
     sed -n '3,9s/^# \{0,1\}//p' "$SOF_SRC/cmd/hdmi-frl.sh"
 }
 
+# _hdmi_frl_debugfs_dirs : one DRM debugfs directory per device. Kernel 7.x
+# registers each card under its PCI slot (0000:03:00.0) and aliases it
+# under its minor numbers (0, 128); prefer the slot names, else the numbers.
+_hdmi_frl_debugfs_dirs() {
+    local d any=0
+    for d in "$(sof_path /sys/kernel/debug/dri)"/0000:*; do
+        [ -d "$d" ] || continue
+        any=1
+        printf '%s\n' "$d"
+    done
+    [ "$any" = 1 ] && return 0
+    for d in "$(sof_path /sys/kernel/debug/dri)"/[0-9]*; do
+        [ -d "$d" ] || continue
+        case "${d##*/}" in [0-9] | [0-9][0-9]) printf '%s\n' "$d" ;; esac
+    done
+    return 0
+}
+
 # _hdmi_frl_first_line <glob...> : first line of the first readable file.
 _hdmi_frl_first_line() {
     local f
@@ -28,7 +46,7 @@ _hdmi_frl_first_line() {
 
 # _hdmi_frl_status_report : the human report.
 _hdmi_frl_status_report() {
-    local kver c dbg f rng bpc modes lp loaded
+    local kver c d dbg f rng bpc modes lp loaded v
     kver=$(probe_running_kver)
     printf 'hdmi-frl: %s\n' "$(component_status hdmi_frl)"
     printf '  %-22s %s\n' "detail:" "$(component_status_detail hdmi_frl)"
@@ -65,8 +83,9 @@ _hdmi_frl_status_report() {
         printf '    %-20s %s\n' "preferred mode:" "${modes:-unknown}"
         # debugfs needs root: vrr_range and the current bpc per crtc.
         rng=""
-        for dbg in "$(sof_path /sys/kernel/debug/dri)"/*/"${c#card*-}"/vrr_range "$(sof_path /sys/kernel/debug/dri)"/*/"$c"/vrr_range; do
-            [ -r "$dbg" ] && rng=$(tr '\n' ' ' <"$dbg") && break
+        for dbg in $(_hdmi_frl_debugfs_dirs); do
+            dbg="$dbg/${c#card*-}/vrr_range"
+            [ -r "$dbg" ] && rng=$(tr '\n' ' ' <"$dbg" 2>/dev/null) && break
         done
         if [ -n "$rng" ]; then
             printf '    %-20s %s\n' "vrr_range:" "$rng"
@@ -77,8 +96,13 @@ _hdmi_frl_status_report() {
             printf '    %-20s %s\n' "vrr_range:" "run as root for /sys/kernel/debug/dri/*/${c#card*-}/vrr_range"
         fi
         bpc=""
-        for dbg in "$(sof_path /sys/kernel/debug/dri)"/*/crtc-*/amdgpu_current_bpc; do
-            [ -r "$dbg" ] && bpc="${bpc:+$bpc, }$(basename "$(dirname "$dbg")"): $(tr '\n' ' ' <"$dbg")"
+        for d in $(_hdmi_frl_debugfs_dirs); do
+            for dbg in "$d"/crtc-*/amdgpu_current_bpc; do
+                [ -r "$dbg" ] || continue
+                v=$(tr '\n' ' ' <"$dbg" 2>/dev/null) || continue
+                # an unused crtc reads "No such device"; only live ones have a value
+                bpc="${bpc:+$bpc, }${d##*/}/$(basename "$(dirname "$dbg")"): ${v% }"
+            done
         done
         [ -n "$bpc" ] && printf '    %-20s %s\n' "current bpc:" "$bpc"
     done

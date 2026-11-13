@@ -266,11 +266,14 @@ booted_with_arg() {
     booted_with_arg
     fixture_file /sys/module/amdgpu/taint "OE
 "
-    fixture_file /sys/kernel/debug/dri/0/HDMI-A-1/vrr_range "Min: 40
+    # kernel 7.x: the card under its PCI slot, aliased under its minors
+    for d in 0000:03:00.0 0 128; do
+        fixture_file "/sys/kernel/debug/dri/$d/HDMI-A-1/vrr_range" "Min: 40
 Max: 144
 "
-    fixture_file /sys/kernel/debug/dri/0/crtc-0/amdgpu_current_bpc "Current: 10
+        fixture_file "/sys/kernel/debug/dri/$d/crtc-0/amdgpu_current_bpc" "Current: 10
 "
+    done
     run "$FAKE_CLI" --root "$SOF_ROOT" hdmi-frl status
     assert_success
     assert_output_contains "configured:            frl"
@@ -278,7 +281,8 @@ Max: 144
     assert_output_contains "card0-HDMI-A-1"
     assert_output_contains "preferred mode:      3840x2160"
     assert_output_contains "vrr_range:           Min: 40 Max: 144"
-    assert_output_contains "current bpc:         crtc-0: Current: 10"
+    assert_output_contains "current bpc:         0000:03:00.0/crtc-0: Current: 10"
+    [ "$(printf '%s\n' "$output" | grep -c 'Current: 10')" = 1 ]
     assert_output_contains "amdgpu taint:          OE"
     run "$FAKE_CLI" --root "$SOF_ROOT" hdmi-frl tmds
     assert_success

@@ -56,9 +56,13 @@ the `steam-deck` hook lists storage, USB, HID and Deck platform modules,
 **not amdgpu**, and there is no `kms` or `autodetect` hook. The expectation
 is therefore that amdgpu loads from the root filesystem and the hook works.
 
-**Measured on the Steam Machine:** `TODO(hw)` — run
-`lsinitcpio -l /boot/initramfs-linux-neptune-72.img | grep -c amdgpu` and
-record the answer here.
+**Measured on the Steam Machine (SteamOS 3.9.5, build 20261023.100,
+kernel `7.2.7-valve2-2-neptune-72-g31504582a073`, 2026-11-13):**
+`lsinitcpio -l /boot/initramfs-linux-neptune-72.img | grep -c amdgpu` → `0`.
+The initramfs carries no amdgpu and no modprobe.d entry about it, so
+amdgpu loads from the root filesystem and the **modprobe hook is the path
+in use**; the early initrd override stays dormant (and would fit: the stock
+`amdgpu.ko.zst` is 5.5 MB, the efi partition has 63 MB free).
 
 The component does not rely on the expectation. At apply time it lists the
 slot's initramfs (`lsinitcpio`, else `bsdtar -tf`, else
@@ -139,8 +143,8 @@ retry loop. Valve's kernels are built with `LOCK_DOWN_KERNEL_FORCE_NONE`.
   `-g<commit>` suffix.
 - The early initrd override lives on the slot's `efi` partition
   (`/efi/EFI/steamos`, vfat): a large module such as amdgpu takes tens of
-  megabytes there. `TODO(hw)`: free space on the Steam Machine's efi
-  partitions.
+  megabytes there (Steam Machine: 64 MB partitions with 63 MB free; stock
+  `amdgpu.ko.zst` is 5.5 MB).
 
 ## Why the boot-time files live under `/etc/steamos-fixes`
 
