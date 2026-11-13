@@ -1,0 +1,47 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
+# RAUC post-install handler of steamos-fixes (registered in
+# /etc/rauc/system.conf by lib/rauc.sh, installed as
+# /var/lib/steamos-fixes/libexec/rauc-post-install.hook).
+#
+# RAUC runs it after the new slot was written, before the reboot. Order:
+#   1. the stock post-install handler first (chained). On SteamOS it rsyncs
+#      the booted /var into the new slot's var and regenerates the new
+#      slot's GRUB config, both of which we build on. If it fails we stop
+#      and return its status, exactly as without us;
+#   2. ours: `steamos-fixes.sh rauc-handler post-install` (mount the new
+#      slot, apply --slot, boot entry, stage modules, pending-reboot-check).
+#      Its failures are logged and never fail the update: the boot service
+#      retries the same steps on first boot.
+# Self-contained on purpose (see pre-install.hook).
+set -u
+
+SOF_STATE_DIR=${SOF_STATE_DIR:-${SOF_ROOT:-}/var/lib/steamos-fixes}
+SOF_SRC=${SOF_SRC:-$SOF_STATE_DIR/src}
+export SOF_SRC
+cli=$SOF_SRC/steamos-fixes.sh
+
+say() { printf 'steamos-fixes rauc post-install: %s\n' "$*" >&2; }
+chained() { sed -n "s/^$1=//p" "$SOF_STATE_DIR/state/rauc-chain" 2>/dev/null | head -n1; }
+
+stock=$(chained post-install)
+if [ -n "$stock" ]; then
+    if [ -x "${SOF_ROOT:-}$stock" ]; then
+        src=0
+        "${SOF_ROOT:-}$stock" "$@" || src=$?
+        if [ "$src" -ne 0 ]; then
+            say "stock handler $stock failed ($src); not touching the new slot"
+            exit "$src"
+        fi
+    else
+        say "chained handler $stock is not executable; skipping it"
+    fi
+fi
+
+if [ -x "$cli" ] && [ -f "$SOF_SRC/cmd/rauc-handler.sh" ]; then
+    "$cli" rauc-handler post-install \
+        || say "re-apply to the new slot failed; steamos-fixes.service will retry on first boot"
+else
+    say "checkout not found at $SOF_SRC; nothing to re-apply"
+fi
+exit 0

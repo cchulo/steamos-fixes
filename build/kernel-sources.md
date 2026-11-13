@@ -1,0 +1,231 @@
+# Kernel sources and the module build
+
+How `build/build-modules.sh` finds headers and sources for a SteamOS kernel,
+and how to run it on the device, on a PC, and in CI. Background: plan §3 and
+§4.5. User-facing behaviour: [`docs/kernel-modules.md`](../docs/kernel-modules.md).
+
+## The kernel version string
+
+The build is keyed by the full `uname -r` of the target kernel, for example
+(SteamOS 3.9 stable)
+
+```
+7.2.7-valve2-2-neptune-72-g31504582a073
+│     │      │ │          └ CONFIG_LOCALVERSION_AUTO: Valve git commit (12 hex digits)
+│     │      │ └ localversion.20-pkgname  (pkgbase linux-neptune-72)
+│     │      └ localversion.10-pkgrel     (pkgrel 2)
+│     └ Valve tag suffix                  (tag 7.2.7-valve2)
+└ upstream base
+```
+
+From it the script derives the package `linux-neptune-72` at version
+`7.2.7.valve2-2` (`pkgver=${_tag//-/.}` in Valve's PKGBUILD), the headers
+package `linux-neptune-72-headers`, and the git tag `7.2.7-valve2`. The
+`-g<commit>` suffix is part of vermagic: a KVER without it builds modules
+that the kernel rejects, so always pass the complete `uname -r`.
+
+## Package mirror layout
+
+Base: `https://steamdeck-packages.steamos.cloud/archlinux-mirror/`
+
+| What | URL |
+|---|---|
+| repo database (tar.xz, despite the name) | `<repo>/os/x86_64/<repo>.db` |
+| kernel package | `<repo>/os/x86_64/linux-neptune-72-7.2.7.valve2-2-x86_64.pkg.tar.zst` |
+| headers package | `<repo>/os/x86_64/linux-neptune-72-headers-7.2.7.valve2-2-x86_64.pkg.tar.zst` |
+| source package | `sources/<repo>/linux-neptune-72-7.2.7.valve2-2.src.tar.gz` |
+
+Repos that carry kernels: the per-release repo of a stable series
+(`jupiter-3.9` holds the kernel a stock SteamOS 3.9.x boots:
+`linux-neptune-72-7.2.7.valve2-2`), `jupiter-main` (newer kernels, e.g.
+`7.2.10.valve1-3`, `7.3.1.valve1-1`), `jupiter-staging` (candidates, e.g.
+`7.2.7.valve2-3`), dated snapshots, and `jupiter-rel` (only very old
+kernels). There is no `jupiter-beta` repo. The search order is
+`CHANNEL`, then `jupiter-3.9 jupiter-main jupiter-staging jupiter-rel`
+(`BM_ALL_CHANNELS`); a stable device maps its `VERSION_ID` to its
+per-release repo (`lib/modules.sh`). Each database entry
+(`<name>-<version>/desc`) has `%FILENAME%`, `%NAME%`, `%VERSION%`,
+`%SHA256SUM%`; the script picks the exact name and version and checks the
+downloaded file's SHA-256 against `%SHA256SUM%`. The database only lists
+the newest build of each package, so an older pkgrel (for example
+`7.2.7.valve2-1` once `-2` is out) is no longer found there. That case
+falls through to the source steps.
+
+The headers package contains
+`usr/lib/modules/<uname -r>/build/{.config,Module.symvers,version,Makefile,scripts,include,...}`
+but **no driver `.c` files**. The source package is several GB: it embeds
+the whole git history as a bare repository (`archlinux-linux-neptune/`)
+next to `PKGBUILD`, `config.x86_64` and `config-neptune`.
+
+### Finding the current kernel of a channel
+
+```sh
+repo=jupiter-main
+curl -fsSL "https://steamdeck-packages.steamos.cloud/archlinux-mirror/$repo/os/x86_64/$repo.db" \
+  | tar -tJf - | grep -E '^linux-neptune-[0-9]+-headers-.*/$'
+```
+
+The full `uname -r` (with `-g<commit>`) is the directory name inside the
+headers package:
+
+```sh
+curl -fsSL "https://steamdeck-packages.steamos.cloud/archlinux-mirror/$repo/os/x86_64/<headers file>" \
+  | zstd -dc | tar -tf - | grep -m1 -oE 'usr/lib/modules/[^/]+' | cut -d/ -f4
+```
+
+On the device itself: `uname -r`, or `ls /usr/lib/modules` for the other
+slot. Add new versions to `build/kernels.txt` so CI builds them.
+
+## Header resolution order (BUILD-INFO `header_source`)
+
+1. **Cache** — `CACHE_DIR/headers/<kver>/` from an earlier run; BUILD-INFO
+   also records `header_origin` (the step that originally produced it).
+2. **Valve headers package** from the mirror: the repo given by `CHANNEL`
+   first, then `jupiter-3.9 jupiter-main jupiter-staging jupiter-rel`
+   (`BM_ALL_CHANNELS`).
+3. **Valve source** + `make modules_prepare`. The source is the evlaV
+   GitHub mirror of `gitlab.steamos.cloud/jupiter/linux-integration`
+   (`https://github.com/evlaV/linux-integration.git`, tag `<base>-valveN`,
+   whose commit must equal the `-g<commit>` suffix), or the mirror's
+   `.src.tar.gz`, or `KERNEL_SRC_URL`. The `.config` comes from
+   `KERNEL_CONFIG`, else `scripts/extract-ikconfig` on the target kernel
+   image (`VMLINUZ`, or the `linux-neptune-*` package from the mirror;
+   SteamOS enables `CONFIG_IKCONFIG`), else Valve's `config.x86_64` merged
+   with `config-neptune`. `KERNELRELEASE=<kver>` pins vermagic. With no
+   published `Module.symvers` the kernel is built once to produce it
+   (tens of minutes; `BM_FULL_BUILD=0` disables this).
+4. **linux-stable `v<base>`** — only when every file the patches touch, and
+   every file under each `M=` directory, is byte-identical to the cached
+   Valve tree; otherwise the build fails. Valve carries amdgpu changes, so
+   expect this to be refused for `amdgpu`.
+
+Steps 1 and 2 provide no `.c` files, so the `M=` directories come from a
+blobless sparse checkout of the exact Valve tag (the first two path
+components of each `M=` dir, so relative includes like `../../codecs`
+resolve, plus the directory of every `include/` header a patch changes),
+cached in `CACHE_DIR/valve-sparse/<kver>`. The cache records its paths
+(`sparse=` in `.sof-source`) and is fetched again when a new list needs
+more.
+
+## What the script then does
+
+1. Reads every `patches/kernel/modules*.list` (`<patch>\t<M= dir>\t<ko>`).
+   Every file a patch touches must be under one of the `M=` dirs it is
+   listed with, or under that dir's parent when the parent is at least
+   three components deep (`amdgpu.ko` is built from
+   `drivers/gpu/drm/amd/amdgpu`, whose Makefile also compiles
+   `drivers/gpu/drm/amd/display/`), otherwise a headers-based build would
+   silently ignore it. Two exceptions: `Documentation/` (not applied) and
+   `include/` (see 3). A patch that changes a shared header must be listed
+   once for every module that uses it.
+2. Hard-link copies the source into a work tree and applies the patches in
+   file-name order with `git apply`. A patch that only applies in reverse
+   is already in Valve's tree: it is skipped and recorded as
+   `patch.<file>.status=already-upstream`. So is a patch whose description
+   has a `Valve-Upstream: <x.y.z>-valveN` line when the target's tag is that
+   tag or newer: a backport that had to be adjusted for an older tree no
+   longer reverse-applies on the tree that carries the original. A module whose patches are all
+   upstream is not built and is recorded as `module.<name>=superseded`.
+   A patch that applies neither way fails the build.
+3. `make -C <headers> M=<work>/<dir> <name>.ko…` for each distinct dir,
+   naming only the listed modules (kbuild single targets), so a dir such as
+   `sound/soc/codecs` does not build every configured codec. When an applied
+   patch changes an `include/` header, the patched copies are put in
+   `<work>/tree.include` and passed as
+   `NOSTDINC_FLAGS="-nostdinc -I<work>/tree.include"`, the only kbuild flags
+   that come before the kernel's own `include/` (the top Makefile sets
+   `NOSTDINC_FLAGS` to just `-nostdinc`).
+4. For each listed module: `strip --strip-debug`, `modinfo -F vermagic`
+   must start with KVER, every `nm -u` symbol must be exported in
+   `Module.symvers` (headers plus the M= dirs' own), and CRCs from
+   `modprobe --dump-modversions` must match (SteamOS 7.2 kernels have
+   `CONFIG_MODVERSIONS` off, so only presence is checked there).
+5. `zstd -19` into `OUT_DIR/<kver>/<name>.ko.zst` and writes `BUILD-INFO`
+   (kver, vermagic, header source and URL/sha256, source URL/ref, patch
+   hashes and status, module hashes, repo commit, date, container digest).
+
+## Refreshing the container image pins
+
+`build/Containerfile` pins the Arch base image by digest and the package
+set by Arch Linux Archive date. Keep the compiler close to the one Valve
+used (`CONFIG_CC_VERSION_TEXT` in the headers' `.config`; 7.2.7-valve2 was
+built with GCC 16.1.1).
+
+```sh
+# newest digest of archlinux:base-devel
+tok=$(curl -fsS "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/archlinux:pull" | jq -r .token)
+curl -fsSI -H "Authorization: Bearer $tok" \
+  -H 'Accept: application/vnd.oci.image.index.v1+json' \
+  https://registry-1.docker.io/v2/library/archlinux/manifests/base-devel | grep -i docker-content-digest
+```
+
+Put the digest in `ARG ARCH_IMAGE`, set `ARG ARCH_ARCHIVE_DATE` to the
+image's build date (`YYYY/MM/DD`, a day that exists on
+archive.archlinux.org), rebuild, and run the build for every kernel in
+`build/kernels.txt` before committing.
+
+## Running the build
+
+### On the device (SteamOS, rootless podman)
+
+SteamOS ships podman. Nothing is installed on the host; the image and its
+layers live in `~/.local/share/containers` (on `/home`, survives updates).
+
+```sh
+sudo steamos-fixes.sh rebuild                 # cache -> release asset -> container
+sudo steamos-fixes.sh rebuild --source container --kver "$(uname -r)"
+```
+
+Run as root (boot service, `sudo`), podman is rootful and keeps its images
+in `/var/lib/containers`; the build runs as uid 1000 inside the container.
+Caches: `/var/lib/steamos-fixes/cache/{build,artifacts,build-out}`.
+The image can also be used by hand as the `deck` user:
+
+```sh
+cd /var/lib/steamos-fixes/src
+podman build -t localhost/steamos-fixes-build -f build/Containerfile build
+mkdir -p ~/sof-build/{cache,out}
+podman run --rm --userns=keep-id --security-opt label=disable \
+  -v "$PWD:/src:ro" -v ~/sof-build/cache:/cache -v ~/sof-build/out:/out \
+  -v "/usr/lib/modules/$(uname -r)/vmlinuz:/vmlinuz:ro" -e VMLINUZ=/vmlinuz \
+  -e KVER="$(uname -r)" -e CHANNEL=jupiter-3.9 -e HOME=/tmp \
+  localhost/steamos-fixes-build
+```
+
+### On a PC (Fedora or any Linux with podman)
+
+Same `podman` commands as above with any `KVER` (no `VMLINUZ` needed when
+the mirror still carries that kernel). `--security-opt label=disable`
+avoids relabelling the checkout under SELinux. Without a container, on a
+Linux host with `base-devel bc kmod zstd xz cpio pahole python git curl
+rsync` equivalents:
+
+```sh
+KVER=7.2.7-valve2-2-neptune-72-g31504582a073 build/build-modules.sh \
+  --out-dir build/out --cache-dir build/cache
+```
+
+`build/out/` and `build/cache/` are git-ignored.
+
+### In CI
+
+`.github/workflows/build-modules.yml` builds every line of
+`build/kernels.txt` (or the `kver` input of a manual run) in this
+container on `ubuntu-latest`, uploads `modules-<kver>.tar.zst`, its
+`.sha256` and `BUILD-INFO-<kver>` as artifacts, and on `v*` tags attaches
+them to the GitHub release. Devices download
+`https://github.com/cchulo/steamos-fixes/releases/latest/download/modules-<kver>.tar.zst`
+(override with `SOF_MODULES_RELEASE_URL`). The workflow skips the build
+while no `patches/kernel/modules*.list` exists.
+
+## Disk and time
+
+| Path | Size (approx.) | Time |
+|---|---|---|
+| step 2 headers package | 90 MB download, 320 MB unpacked | ~1 min |
+| sparse Valve checkout of the M= dirs | tens of MB | <1 min |
+| `make` of the listed `.ko` files (single targets) | | a few minutes; the whole amdgpu driver: tens of minutes to over an hour |
+| step 3 via the `.src.tar.gz` | 3.4 GB download, ~8 GB unpacked | long |
+| step 3 full kernel build for Module.symvers | ~15 GB | 20-60 min |
+
+TODO(hw): measure these on the Steam Machine and in CI.

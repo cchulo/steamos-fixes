@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# User-session half of SteamOS update survival (plan §4.2 step 3): one
+# notification per new boot summary (re-applied / pending rebuild /
+# superseded / update blocked), read from
+# /var/lib/steamos-fixes/state/notify. Already-shown summaries are
+# remembered in ~/.local/state/steamos-fixes/notified.
+# TODO(vm): confirm Game Mode (gamescope-session) shows freedesktop
+# notifications; Desktop Mode (Plasma) does.
+[Unit]
+Description=steamos-fixes: notify about re-applied, pending and superseded fixes
+After=graphical-session.target
+ConditionPathExists=/var/lib/steamos-fixes/state/notify
+
+[Service]
+Type=oneshot
+ExecStartPre=-/bin/sleep 10
+ExecStart=/var/lib/steamos-fixes/src/steamos-fixes.sh notify
+TimeoutStartSec=60s
+
+[Install]
+WantedBy=default.target

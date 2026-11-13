@@ -1,0 +1,17 @@
+# Build outputs and binaries that must never be committed (see STEAMOS-FIXES-PLAN.md)
+*.ko
+*.ko.zst
+*.o
+*.so
+*.so.[0-9]*
+build/out/
+build/cache/
+*.img
+*.qcow2
+*.iso
+# Tooling
+__pycache__/
+.pytest_cache/
+*.pyc
+.DS_Store
+tests/.tmp/

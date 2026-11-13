@@ -1,0 +1,2 @@
+keys/release-signing.asc
+build/keys/steamos-package-signing.asc

@@ -1,0 +1,43 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
+# RAUC pre-install handler of steamos-fixes (registered in
+# /etc/rauc/system.conf by lib/rauc.sh, installed as
+# /var/lib/steamos-fixes/libexec/rauc-pre-install.hook).
+#
+# RAUC runs it after the bundle is verified and mounted, before anything is
+# written; a non-zero exit aborts the update. Order:
+#   1. ours: `steamos-fixes.sh rauc-handler pre-install` (self-update,
+#      make sure modules exist for the incoming kernel, apply update-policy);
+#   2. the stock pre-install handler, if system.conf had one (chained).
+# Self-contained on purpose: if the checkout is gone or broken we only run
+# the chained handler, so steamos-fixes can never be the reason an
+# update fails — except by the explicit "block" policy.
+set -u
+
+SOF_STATE_DIR=${SOF_STATE_DIR:-${SOF_ROOT:-}/var/lib/steamos-fixes}
+SOF_SRC=${SOF_SRC:-$SOF_STATE_DIR/src}
+export SOF_SRC
+cli=$SOF_SRC/steamos-fixes.sh
+
+say() { printf 'steamos-fixes rauc pre-install: %s\n' "$*" >&2; }
+chained() { sed -n "s/^$1=//p" "$SOF_STATE_DIR/state/rauc-chain" 2>/dev/null | head -n1; }
+
+rc=0
+if [ -x "$cli" ] && [ -f "$SOF_SRC/cmd/rauc-handler.sh" ]; then
+    "$cli" rauc-handler pre-install || rc=$?
+else
+    say "checkout not found at $SOF_SRC; skipping our checks"
+fi
+if [ "$rc" -ne 0 ]; then
+    say "update blocked by steamos-fixes (see: steamos-fixes.sh update-policy)"
+    exit "$rc"
+fi
+
+stock=$(chained pre-install)
+if [ -n "$stock" ]; then
+    if [ -x "${SOF_ROOT:-}$stock" ]; then
+        exec "${SOF_ROOT:-}$stock" "$@"
+    fi
+    say "chained handler $stock is not executable; skipping it"
+fi
+exit 0

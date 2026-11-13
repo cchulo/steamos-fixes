@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Boot-time half of SteamOS update survival (plan §4.2 step 2).
+# Re-applies whatever an update dropped on this slot, re-registers the RAUC
+# handlers, reconciles the boot entry, starts a detached module build when
+# the running kernel has none, runs the probes and writes status.json.
+# Bounded: a stuck run is killed after TimeoutStartSec and boot continues
+# (nothing Requires= this unit). Builds run detached and take effect on the
+# next boot.
+[Unit]
+Description=steamos-fixes: re-apply out-of-tree fixes after SteamOS updates
+Documentation=file:///var/lib/steamos-fixes/src/docs/update-survival.md
+After=local-fs.target
+Before=display-manager.service graphical.target
+ConditionPathExists=/var/lib/steamos-fixes/src/steamos-fixes.sh
+
+[Service]
+Type=oneshot
+ExecStart=/var/lib/steamos-fixes/src/steamos-fixes.sh boot
+TimeoutStartSec=15s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

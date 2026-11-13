@@ -1,0 +1,13 @@
+# Known SteamOS kernel versions the CI builds release artifacts for.
+# Format: <uname -r> <package repo>
+# The full `uname -r` includes Valve's -g<commit> suffix (CONFIG_LOCALVERSION_AUTO);
+# it is the directory name inside the headers package of that repo
+# (build/kernel-sources.md). Keep the stable kernel first.
+#
+# SteamOS 3.9 stable (jupiter-3.9 release repo; what a stock Steam Machine runs).
+7.2.7-valve2-2-neptune-72-g31504582a073 jupiter-3.9
+# Same kernel, pkgrel 3 (jupiter-staging as of 2026-11-12).
+7.2.7-valve2-3-neptune-72-g31504582a073 jupiter-staging
+# Valve's next 7.2 kernel (jupiter-main): enables FRL by default and carries the
+# freesync fix, so the build records module.amdgpu=superseded and ships no .ko.
+7.2.10-valve1-3-neptune-72-g1b214a39f3cb jupiter-main

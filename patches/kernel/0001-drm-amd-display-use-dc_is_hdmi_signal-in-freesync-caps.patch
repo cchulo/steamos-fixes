@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Tomasz=20Paku=C5=82a?= <forest10pl@gmail.com>
+Date: Wed, 1 Jul 2026 23:33:19 +0200
+Subject: [PATCH] drm/amd/display: use dc_is_hdmi_signal() in freesync caps so
+ FRL sinks get VRR
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+amdgpu_dm_update_freesync_caps() only parses the HDMI VRR range when
+sink->sink_signal == SIGNAL_TYPE_HDMI_TYPE_A. A sink trained at HDMI 2.1
+FRL is SIGNAL_TYPE_HDMI_FRL, so with FRL enabled
+(amdgpu.dcfeaturemask=0x402, DC_FRL_MASK) it falls through, vrr_range
+reads 0-0 and vrr_capable stays 0 although the TV advertises VRR.
+
+Test dc_is_hdmi_signal() instead, which covers both HDMI signal types.
+With it an LG C4 at 3840x2160@144 10-bit 4:4:4 over FRL reports a
+40-144 Hz VRR range again.
+
+Derived from: Tomasz Pakuła, commit 21d564d5a104e37deea7cba5fca24776915fd36d
+("Switch to signal type helper functions from DC — This fixes HDMI VRR
+under FRL") on the hdmi-7.2 branch of https://github.com/Lawstorant/linux,
+reduced to the freesync-caps hunk as isolated and verified on a Steam
+Machine by https://github.com/beaglemoo/steam-machine-hdmi21 (patch 0001).
+Reported in https://github.com/ValveSoftware/SteamOS/issues/2809 and
+https://github.com/ValveSoftware/SteamOS/issues/2698.
+
+Valve's 7.2.10-valve1 (linux-integration 152e053e341f, "[NOT-FOR-UPSTREAM]
+drm/amdgpu: Add full HDMI 2.1 support (SQUASHED SERIES)") rewrites this
+function to accept SIGNAL_TYPE_HDMI_FRL and enables FRL by default, so
+this patch is already upstream there without reverse-applying textually.
+
+Valve-Upstream: 7.2.10-valve1
+---
+ drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
+index a9c81af..11fb78d 100644
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
+@@ -14508,7 +14508,7 @@ void amdgpu_dm_update_freesync_caps(struct drm_connector *connector,
+ 		}
+ 
+ 	/* HDMI */
+-	} else if (sink->sink_signal == SIGNAL_TYPE_HDMI_TYPE_A) {
++	} else if (dc_is_hdmi_signal(sink->sink_signal)) {
+ 		/* Prefer HDMI VRR */
+ 		if (hdmi_vrr.supported) {
+ 			amdgpu_dm_connector->as_type = ADAPTIVE_SYNC_TYPE_HDMI;

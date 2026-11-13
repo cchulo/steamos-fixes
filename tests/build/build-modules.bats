@@ -1,0 +1,591 @@
+#!/usr/bin/env bats
+# SPDX-License-Identifier: GPL-2.0-only
+# Unit tests for the pure parts of build/build-modules.sh. Network, git
+# clones and make are never run: bm_fetch is stubbed to read fixture files.
+load '../test_helper'
+
+TAB="$(printf '\t')"
+
+setup() {
+    # shellcheck disable=SC1091
+    . "$REPO_ROOT/build/build-modules.sh"
+    WORK="$BATS_TEST_TMPDIR/work"
+    CACHE_DIR="$BATS_TEST_TMPDIR/cache"
+    PATCHES_DIR="$BATS_TEST_TMPDIR/patches"
+    MIRROR="$BATS_TEST_TMPDIR/mirror"
+    mkdir -p "$WORK" "$CACHE_DIR" "$PATCHES_DIR" "$MIRROR"
+    KVER=7.2.7-valve2-2-neptune-72-g31504582a073
+    CHANNEL=jupiter-main
+    BM_ALL_CHANNELS="jupiter-3.9 jupiter-main jupiter-rel"
+    KERNEL_SRC_URL="" VMLINUZ="" KERNEL_CONFIG="" JOBS=1
+    bm_parse_kver "$KVER"
+    # bm_fetch <url> <dest> : serve <mirror>/<path after the base URL>.
+    bm_fetch() {
+        local rel=${1#"$BM_MIRROR_BASE"/}
+        [ -f "$MIRROR/$rel" ] || return 22
+        cp "$MIRROR/$rel" "$2"
+    }
+}
+
+write_lists() {
+    printf '0001-asoc.patch\tsound/soc/amd/acp\tsnd-soc-acpi-amd-match.ko\n# comment\n\n0002-acp.patch\tsound/soc/amd/\tsnd-acp-config\n' \
+        >"$PATCHES_DIR/modules.list"
+    printf '0010-hid.patch\tdrivers/hid\thid-asus-ally.ko\n0011-hid.patch\t./drivers/hid\thid-asus-ally\n' \
+        >"$PATCHES_DIR/modules-hid.list"
+}
+
+# make_desc <dir> <name> <version> <filename> <sha>
+make_desc() {
+    mkdir -p "$1/$2-$3"
+    printf '%%FILENAME%%\n%s\n\n%%NAME%%\n%s\n\n%%BASE%%\nlinux-neptune-72\n\n%%VERSION%%\n%s\n\n%%SHA256SUM%%\n%s\n\n' \
+        "$4" "$2" "$3" "$5" >"$1/$2-$3/desc"
+}
+
+@test "bm_parse_kver splits a SteamOS kernel release into package coordinates" {
+    bm_parse_kver 7.2.7-valve2-2-neptune-72-g31504582a073
+    [ "$BM_BASE" = 7.2.7 ]
+    [ "$BM_EXTRA" = valve2 ]
+    [ "$BM_REL" = 2 ]
+    [ "$BM_FLAVOUR" = neptune-72 ]
+    [ "$BM_GITHASH" = 31504582a073 ]
+    [ "$BM_PKGBASE" = linux-neptune-72 ]
+    [ "$BM_PKGVER" = 7.2.7.valve2 ]
+    [ "$BM_TAG" = 7.2.7-valve2 ]
+    bm_parse_kver 7.2.7-valve2-1-neptune-72
+    [ "$BM_GITHASH" = "" ]
+    [ "$BM_REL" = 1 ]
+    bm_parse_kver 5.13.0-valve37-1-neptune
+    [ "$BM_PKGBASE" = linux-neptune ]
+    bm_parse_kver 7.2.0-rc3-valve-beta1-2-neptune-72
+    [ "$BM_PKGVER" = 7.2.0.rc3.valve.beta1 ]
+    [ "$BM_TAG" = 7.2.0-rc3-valve-beta1 ]
+    run bm_parse_kver 6.12.0-arch1-1
+    assert_failure
+}
+
+@test "list parsing: both lists, comments skipped, suffixes and slashes normalised" {
+    write_lists
+    run bm_list_entries "$PATCHES_DIR"
+    assert_success
+    [ "${lines[0]}" = "0010-hid.patch${TAB}drivers/hid${TAB}hid-asus-ally" ]
+    [ "${lines[1]}" = "0011-hid.patch${TAB}drivers/hid${TAB}hid-asus-ally" ]
+    [ "${lines[2]}" = "0001-asoc.patch${TAB}sound/soc/amd/acp${TAB}snd-soc-acpi-amd-match" ]
+    [ "${lines[3]}" = "0002-acp.patch${TAB}sound/soc/amd${TAB}snd-acp-config" ]
+    [ "${#lines[@]}" -eq 4 ]
+    [ "$(bm_list_entries "$PATCHES_DIR" | bm_entries_column 2 | tr '\n' ' ')" = "drivers/hid sound/soc/amd sound/soc/amd/acp " ]
+    [ "$(bm_list_entries "$PATCHES_DIR" | bm_kos_for_mdir drivers/hid)" = hid-asus-ally ]
+}
+
+@test "list parsing rejects malformed and unsafe lines" {
+    printf 'only-two\tfields\n' >"$PATCHES_DIR/modules.list"
+    run bm_list_entries "$PATCHES_DIR"
+    assert_failure
+    printf 'p.patch\t../../etc\tx.ko\n' >"$PATCHES_DIR/modules.list"
+    run bm_list_entries "$PATCHES_DIR"
+    assert_failure
+    rm "$PATCHES_DIR/modules.list"
+    run bm_list_entries "$PATCHES_DIR"
+    assert_success
+    [ -z "$output" ]
+}
+
+@test "build script and lib/modules.sh parse the lists identically" {
+    write_lists
+    expected=$(bm_list_entries "$PATCHES_DIR")
+    actual=$(SOF_PATCHES_DIR="$PATCHES_DIR" bash -c '. "$1/lib/modules.sh"; modules_list_entries' _ "$REPO_ROOT")
+    [ "$expected" = "$actual" ]
+}
+
+@test "modprobe.d drop-in is generated from the lists, one hook per module" {
+    write_lists
+    run env SOF_PATCHES_DIR="$PATCHES_DIR" bash -c '. "$1/lib/modules.sh"; modules_render_modprobe_conf' _ "$REPO_ROOT"
+    assert_success
+    hooks=$(printf '%s\n' "$output" | grep '^install ')
+    [ "$(printf '%s\n' "$hooks" | wc -l | tr -d ' ')" = 3 ]
+    for m in hid-asus-ally snd-acp-config snd-soc-acpi-amd-match; do
+        printf '%s\n' "$hooks" | grep -Fxq "install $m /bin/sh -c '/etc/steamos-fixes/load-or-fallback $m \"\$@\" || exec modprobe --ignore-install $m \"\$@\"' -- \$CMDLINE_OPTS"
+    done
+    # nothing points into /usr
+    ! printf '%s\n' "$output" | grep -q ' /usr/'
+}
+
+@test "bm_patch_touched_files and bm_check_patch_scope" {
+    write_lists
+    printf -- '--- a/sound/soc/amd/acp/amd-acp70-acpi-match.c\n+++ b/sound/soc/amd/acp/amd-acp70-acpi-match.c\n@@ -1 +1 @@\n-a\n+b\n' >"$PATCHES_DIR/0001-asoc.patch"
+    printf -- '--- a/sound/soc/amd/acp-config.c\n+++ b/sound/soc/amd/acp-config.c\n@@ -1 +1 @@\n-a\n+b\n' >"$PATCHES_DIR/0002-acp.patch"
+    printf -- '--- a/drivers/hid/hid-asus-ally.c\n+++ b/drivers/hid/hid-asus-ally.c\n@@ -1 +1 @@\n-a\n+b\n' >"$PATCHES_DIR/0010-hid.patch"
+    printf -- '--- /dev/null\n+++ b/drivers/hid/hid-asus-ally-new.h\n@@ -0,0 +1 @@\n+b\n' >"$PATCHES_DIR/0011-hid.patch"
+    [ "$(bm_patch_touched_files "$PATCHES_DIR/0011-hid.patch")" = drivers/hid/hid-asus-ally-new.h ]
+    run bash -c '. "$1"; bm_list_entries "$2" | bm_check_patch_scope "$2"' _ "$REPO_ROOT/build/build-modules.sh" "$PATCHES_DIR"
+    assert_success
+    # include/ headers are allowed: they are searched first for every M= build
+    printf -- '--- a/include/linux/hid.h\n+++ b/include/linux/hid.h\n@@ -1 +1 @@\n-a\n+b\n' >"$PATCHES_DIR/0011-hid.patch"
+    run bash -c '. "$1"; bm_list_entries "$2" | bm_check_patch_scope "$2"' _ "$REPO_ROOT/build/build-modules.sh" "$PATCHES_DIR"
+    assert_success
+    printf -- '--- a/drivers/input/joydev.c\n+++ b/drivers/input/joydev.c\n@@ -1 +1 @@\n-a\n+b\n' >"$PATCHES_DIR/0011-hid.patch"
+    run bash -c '. "$1"; bm_list_entries "$2" | bm_check_patch_scope "$2"' _ "$REPO_ROOT/build/build-modules.sh" "$PATCHES_DIR"
+    assert_failure
+    assert_output_contains "drivers/input/joydev.c, outside M=drivers/hid and its parent"
+    # the parent of the M= dir is allowed: amdgpu.ko is built from
+    # drivers/gpu/drm/amd/amdgpu but compiles ../display/ sources too
+    printf '0030-frl.patch\tdrivers/gpu/drm/amd/amdgpu\tamdgpu.ko\n' >"$PATCHES_DIR/modules-frl.list"
+    printf -- '--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c\n+++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c\n@@ -1 +1 @@\n-a\n+b\n' >"$PATCHES_DIR/0030-frl.patch"
+    printf -- '--- a/drivers/hid/hid-asus-ally.c\n+++ b/drivers/hid/hid-asus-ally.c\n@@ -1 +1 @@\n-a\n+b\n' >"$PATCHES_DIR/0011-hid.patch"
+    run bash -c '. "$1"; bm_list_entries "$2" | bm_check_patch_scope "$2"' _ "$REPO_ROOT/build/build-modules.sh" "$PATCHES_DIR"
+    assert_success
+    printf -- '--- a/drivers/gpu/drm/radeon/radeon_drv.c\n+++ b/drivers/gpu/drm/radeon/radeon_drv.c\n@@ -1 +1 @@\n-a\n+b\n' >>"$PATCHES_DIR/0030-frl.patch"
+    run bash -c '. "$1"; bm_list_entries "$2" | bm_check_patch_scope "$2"' _ "$REPO_ROOT/build/build-modules.sh" "$PATCHES_DIR"
+    assert_failure
+    assert_output_contains "drivers/gpu/drm/radeon/radeon_drv.c, outside M=drivers/gpu/drm/amd/amdgpu and its parent"
+}
+
+@test "bm_check_patch_scope: a patch listed for several M= dirs may touch all of them" {
+    printf '0003-x.patch\tsound/soc/sdw_utils\tsnd-soc-sdw-utils.ko\n0003-x.patch\tsound/soc/amd/acp\tsnd-acp-sdw-sof-mach.ko\n' >"$PATCHES_DIR/modules.list"
+    {
+        printf -- '--- a/include/sound/soc_sdw_utils.h\n+++ b/include/sound/soc_sdw_utils.h\n@@ -1 +1 @@\n-a\n+b\n'
+        printf -- '--- a/sound/soc/amd/acp/acp-sdw-sof-mach.c\n+++ b/sound/soc/amd/acp/acp-sdw-sof-mach.c\n@@ -1 +1 @@\n-a\n+b\n'
+        printf -- '--- a/sound/soc/sdw_utils/soc_sdw_utils.c\n+++ b/sound/soc/sdw_utils/soc_sdw_utils.c\n@@ -1 +1 @@\n-a\n+b\n'
+    } >"$PATCHES_DIR/0003-x.patch"
+    run bash -c '. "$1"; bm_list_entries "$2" | bm_check_patch_scope "$2"' _ "$REPO_ROOT/build/build-modules.sh" "$PATCHES_DIR"
+    assert_success
+    printf -- '--- a/sound/soc/intel/boards/sof_sdw.c\n+++ b/sound/soc/intel/boards/sof_sdw.c\n@@ -1 +1 @@\n-a\n+b\n' >>"$PATCHES_DIR/0003-x.patch"
+    run bash -c '. "$1"; bm_list_entries "$2" | bm_check_patch_scope "$2"' _ "$REPO_ROOT/build/build-modules.sh" "$PATCHES_DIR"
+    assert_failure
+    assert_output_contains "sound/soc/intel/boards/sof_sdw.c, outside M=sound/soc/amd/acp,sound/soc/sdw_utils and its parent"
+}
+
+@test "repo database lookup on a gzip db (exact name and version)" {
+    db="$BATS_TEST_TMPDIR/db"
+    make_desc "$db" linux-neptune-72-headers 7.2.7.valve2-2 linux-neptune-72-headers-7.2.7.valve2-2-x86_64.pkg.tar.zst aaaa
+    make_desc "$db" linux-neptune-72 7.2.7.valve2-2 linux-neptune-72-7.2.7.valve2-2-x86_64.pkg.tar.zst bbbb
+    make_desc "$db" linux-neptune-72-headers-extra 7.2.7.valve2-2 wrong.pkg.tar.zst cccc
+    (cd "$db" && tar -czf "$BATS_TEST_TMPDIR/jupiter-main.db" ./*)
+    run bm_repo_db_lookup "$BATS_TEST_TMPDIR/jupiter-main.db" linux-neptune-72-headers 7.2.7.valve2-2
+    assert_success
+    [ "$output" = "linux-neptune-72-headers-7.2.7.valve2-2-x86_64.pkg.tar.zst${TAB}aaaa" ]
+    run bm_repo_db_lookup "$BATS_TEST_TMPDIR/jupiter-main.db" linux-neptune-72-headers 7.2.7.valve2-1
+    assert_failure
+    [ "$(bm_repo_db_versions "$BATS_TEST_TMPDIR/jupiter-main.db" linux-neptune-72-headers)" = 7.2.7.valve2-2 ]
+}
+
+@test "repo database lookup on xz and zstd databases (the mirror uses xz)" {
+    db="$BATS_TEST_TMPDIR/db"
+    make_desc "$db" linux-neptune-72-headers 7.2.7.valve2-2 h.pkg.tar.zst abcd
+    (cd "$db" && tar -cf "$BATS_TEST_TMPDIR/plain.tar" ./*)
+    if command -v xz >/dev/null 2>&1; then
+        xz -c "$BATS_TEST_TMPDIR/plain.tar" >"$BATS_TEST_TMPDIR/x.db"
+        run bm_repo_db_lookup "$BATS_TEST_TMPDIR/x.db" linux-neptune-72-headers 7.2.7.valve2-2
+        assert_success
+        [ "$output" = "h.pkg.tar.zst${TAB}abcd" ]
+    fi
+    if command -v zstd >/dev/null 2>&1; then
+        zstd -q -c "$BATS_TEST_TMPDIR/plain.tar" >"$BATS_TEST_TMPDIR/z.db"
+        run bm_repo_db_lookup "$BATS_TEST_TMPDIR/z.db" linux-neptune-72-headers 7.2.7.valve2-2
+        assert_success
+        [ "$output" = "h.pkg.tar.zst${TAB}abcd" ]
+    fi
+}
+
+# fake_headers_package <dest-file> : a pacman-style package with a build dir.
+fake_headers_package() {
+    local p="$BATS_TEST_TMPDIR/pkgroot/usr/lib/modules/$KVER/build"
+    mkdir -p "$p"
+    printf 'all:\n' >"$p/Makefile"
+    printf 'CONFIG_HID=y\n' >"$p/.config"
+    printf '0x00000000\thid_hw_start\tvmlinux\tEXPORT_SYMBOL_GPL\t\n' >"$p/Module.symvers"
+    printf '%s\n' "$KVER" >"$p/version"
+    (cd "$BATS_TEST_TMPDIR/pkgroot" && tar -cf - usr) | gzip -c >"$1"
+}
+
+@test "step 2: headers package found via the repo db, checksum verified, cached; step 1 reuses it" {
+    pkgdir="$MIRROR/jupiter-rel/os/x86_64"
+    mkdir -p "$pkgdir" "$MIRROR/jupiter-main/os/x86_64"
+    fn=linux-neptune-72-headers-7.2.7.valve2-2-x86_64.pkg.tar.zst
+    fake_headers_package "$pkgdir/$fn"
+    sha=$(bm_sha256 "$pkgdir/$fn")
+    # jupiter-main has an older release only; jupiter-rel has ours.
+    make_desc "$BATS_TEST_TMPDIR/dbm" linux-neptune-72-headers 7.2.7.valve2-1 old.pkg.tar.zst 0000
+    (cd "$BATS_TEST_TMPDIR/dbm" && tar -czf "$MIRROR/jupiter-main/os/x86_64/jupiter-main.db" ./*)
+    make_desc "$BATS_TEST_TMPDIR/dbr" linux-neptune-72-headers 7.2.7.valve2-2 "$fn" "$sha"
+    (cd "$BATS_TEST_TMPDIR/dbr" && tar -czf "$pkgdir/jupiter-rel.db" ./*)
+    bm_headers_from_mirror
+    [ "$BM_HEADER_SOURCE" = 2 ]
+    [ "$BM_HEADER_URL" = "$BM_MIRROR_BASE/jupiter-rel/os/x86_64/$fn" ]
+    [ "$BM_HEADER_SHA256" = "$sha" ]
+    [ "$BM_CHANNEL_USED" = jupiter-rel ]
+    [ -f "$CACHE_DIR/headers/$KVER/Module.symvers" ]
+    BM_HEADER_SOURCE="" BM_HEADER_URL=""
+    bm_headers_from_cache
+    [ "$BM_HEADER_SOURCE" = 1 ]
+    [ "$BM_HEADER_ORIGIN" = 2 ]
+    [ "$BM_HEADER_URL" = "$BM_MIRROR_BASE/jupiter-rel/os/x86_64/$fn" ]
+}
+
+@test "step 2 rejects a package whose sha256 differs from the repo db" {
+    pkgdir="$MIRROR/jupiter-main/os/x86_64"
+    mkdir -p "$pkgdir"
+    fn=linux-neptune-72-headers-7.2.7.valve2-2-x86_64.pkg.tar.zst
+    fake_headers_package "$pkgdir/$fn"
+    make_desc "$BATS_TEST_TMPDIR/db" linux-neptune-72-headers 7.2.7.valve2-2 "$fn" deadbeef
+    (cd "$BATS_TEST_TMPDIR/db" && tar -czf "$pkgdir/jupiter-main.db" ./*)
+    run bm_headers_from_mirror
+    assert_failure
+    assert_output_contains "sha256 does not match"
+    [ ! -d "$CACHE_DIR/headers/$KVER" ]
+}
+
+# test_pkg_key : a throwaway OpenPGP key for signing fixture packages; sets
+# TEST_GH (its GNUPGHOME) and BM_PKG_KEYRING (its armored export). Skips
+# the test when gpg cannot generate keys on this host.
+test_pkg_key() {
+    command -v gpg >/dev/null 2>&1 || skip "gpg not installed on this host"
+    TEST_GH="$BATS_TEST_TMPDIR/gnupg"
+    mkdir -p "$TEST_GH" && chmod 700 "$TEST_GH"
+    : >"$TEST_GH/common.conf"
+    if ! GNUPGHOME="$TEST_GH" gpg --batch --quiet --passphrase '' --quick-gen-key 'Fixture Signer <sign@example.invalid>' ed25519 sign never 2>/dev/null; then
+        GNUPGHOME="$TEST_GH" gpgconf --kill all 2>/dev/null || true
+        skip "gpg cannot generate a key on this host"
+    fi
+    GNUPGHOME="$TEST_GH" gpg --batch --armor --export sign@example.invalid >"$BATS_TEST_TMPDIR/fixture-signing.asc"
+    BM_PKG_KEYRING="$BATS_TEST_TMPDIR/fixture-signing.asc"
+}
+
+teardown() {
+    [ -n "${TEST_GH:-}" ] && GNUPGHOME="$TEST_GH" gpgconf --kill all 2>/dev/null
+    return 0
+}
+
+# db_lists_newer_rel <pkgdir> <channel> : a repo database that only knows
+# 7.2.7.valve2-3 of the headers package (Valve bumped the pkgrel).
+db_lists_newer_rel() {
+    make_desc "$BATS_TEST_TMPDIR/db-$2" linux-neptune-72-headers 7.2.7.valve2-3 newer.pkg.tar.zst 1111
+    (cd "$BATS_TEST_TMPDIR/db-$2" && tar -czf "$1/$2.db" ./*)
+}
+
+@test "step 2 fetches the package by name when the repo db has moved to a newer pkgrel, verifying its signature" {
+    test_pkg_key
+    pkgdir="$MIRROR/jupiter-main/os/x86_64"
+    mkdir -p "$pkgdir"
+    fn=linux-neptune-72-headers-7.2.7.valve2-2-x86_64.pkg.tar.zst
+    fake_headers_package "$pkgdir/$fn"
+    GNUPGHOME="$TEST_GH" gpg --batch --quiet --detach-sign -o "$pkgdir/$fn.sig" "$pkgdir/$fn"
+    db_lists_newer_rel "$pkgdir" jupiter-main
+    run bm_headers_from_mirror
+    assert_success
+    assert_output_contains "no linux-neptune-72-headers 7.2.7.valve2-2 (has: 7.2.7.valve2-3"
+    assert_output_contains "fetched by name"
+    assert_output_contains "signature verified"
+    # Globals (run forks): call it again directly.
+    rm -rf "$CACHE_DIR/headers"
+    bm_headers_from_mirror
+    [ "$BM_HEADER_SOURCE" = 2 ]
+    [ "$BM_HEADER_URL" = "$BM_MIRROR_BASE/jupiter-main/os/x86_64/$fn" ]
+    [ "$BM_HEADER_SHA256" = "$(bm_sha256 "$pkgdir/$fn")" ]
+    [ "$BM_HEADER_VERIFIED" = signature ]
+    [ "$BM_CHANNEL_USED" = jupiter-main ]
+    [ -f "$CACHE_DIR/headers/$KVER/Module.symvers" ]
+    grep -qx 'header_verified=signature' "$CACHE_DIR/headers/$KVER.provenance"
+    BM_HEADER_SOURCE="" BM_HEADER_VERIFIED=""
+    bm_headers_from_cache
+    [ "$BM_HEADER_ORIGIN" = 2 ]
+    [ "$BM_HEADER_VERIFIED" = signature ]
+}
+
+@test "the db route is still preferred and records header_verified=repo-db" {
+    pkgdir="$MIRROR/jupiter-main/os/x86_64"
+    mkdir -p "$pkgdir"
+    fn=linux-neptune-72-headers-7.2.7.valve2-2-x86_64.pkg.tar.zst
+    fake_headers_package "$pkgdir/$fn"
+    make_desc "$BATS_TEST_TMPDIR/db" linux-neptune-72-headers 7.2.7.valve2-2 "$fn" "$(bm_sha256 "$pkgdir/$fn")"
+    (cd "$BATS_TEST_TMPDIR/db" && tar -czf "$pkgdir/jupiter-main.db" ./*)
+    bm_headers_from_mirror
+    [ "$BM_HEADER_VERIFIED" = repo-db ]
+    grep -qx 'header_verified=repo-db' "$CACHE_DIR/headers/$KVER.provenance"
+}
+
+@test "a package fetched by name is refused without a .sig or with a signature from another key" {
+    test_pkg_key
+    pkgdir="$MIRROR/jupiter-main/os/x86_64"
+    mkdir -p "$pkgdir"
+    fn=linux-neptune-72-headers-7.2.7.valve2-2-x86_64.pkg.tar.zst
+    fake_headers_package "$pkgdir/$fn"
+    db_lists_newer_rel "$pkgdir" jupiter-main
+    run bm_headers_from_mirror
+    assert_failure
+    assert_output_contains "has no .sig"
+    [ ! -d "$CACHE_DIR/headers/$KVER" ]
+    # Signed by a key that is not in the keyring (second key in the same
+    # home; BM_PKG_KEYRING was exported before it existed).
+    GNUPGHOME="$TEST_GH" gpg --batch --quiet --passphrase '' --quick-gen-key 'Someone Else <else@example.invalid>' ed25519 sign never 2>/dev/null \
+        || skip "gpg cannot generate a second key"
+    GNUPGHOME="$TEST_GH" gpg --batch --quiet --local-user else@example.invalid --detach-sign -o "$pkgdir/$fn.sig" "$pkgdir/$fn"
+    run bm_headers_from_mirror
+    assert_failure
+    assert_output_contains "signature does not verify"
+    [ ! -d "$CACHE_DIR/headers/$KVER" ]
+    # Tampered package under a good signature.
+    GNUPGHOME="$TEST_GH" gpg --batch --quiet --yes --local-user sign@example.invalid --detach-sign -o "$pkgdir/$fn.sig" "$pkgdir/$fn"
+    printf 'x' >>"$pkgdir/$fn"
+    run bm_headers_from_mirror
+    assert_failure
+    assert_output_contains "signature does not verify"
+}
+
+@test "the shipped keyring is Valve's package signing key" {
+    command -v gpg >/dev/null 2>&1 || skip "gpg not installed on this host"
+    gh="$BATS_TEST_TMPDIR/vk"
+    mkdir -p "$gh" && chmod 700 "$gh"
+    : >"$gh/common.conf"
+    GNUPGHOME="$gh" gpg --batch --quiet --import "$REPO_ROOT/build/keys/steamos-package-signing.asc"
+    GNUPGHOME="$gh" gpg --batch --with-colons --list-keys | grep -q '^fpr:::::::::889B5EBDDD505A683621900DAF1D2199EF0A3CCF:'
+    GNUPGHOME="$gh" gpgconf --kill all 2>/dev/null || true
+    # Found next to the script in a checkout, and through PATCHES_DIR when
+    # the script runs from elsewhere (the container's /usr/local/bin).
+    BM_PKG_KEYRING=""
+    [ "$(bm_pkg_keyring)" = "$REPO_ROOT/build/keys/steamos-package-signing.asc" ]
+    PATCHES_DIR="$REPO_ROOT/patches/kernel" BASH_SOURCE=/usr/local/bin/build-modules.sh bm_pkg_keyring >/dev/null 2>&1 || true
+    [ "$(PATCHES_DIR="$REPO_ROOT/patches/kernel" bm_pkg_keyring)" = "$REPO_ROOT/build/keys/steamos-package-signing.asc" ]
+}
+
+@test "step 2 explains a kver without the -g<commit> suffix" {
+    KVER=7.2.7-valve2-2-neptune-72
+    pkgdir="$MIRROR/jupiter-main/os/x86_64"
+    mkdir -p "$pkgdir"
+    fn=h.pkg.tar.zst
+    KVER=7.2.7-valve2-2-neptune-72-g31504582a073 fake_headers_package "$pkgdir/$fn"
+    make_desc "$BATS_TEST_TMPDIR/db" linux-neptune-72-headers 7.2.7.valve2-2 "$fn" "$(bm_sha256 "$pkgdir/$fn")"
+    (cd "$BATS_TEST_TMPDIR/db" && tar -czf "$pkgdir/jupiter-main.db" ./*)
+    run bm_headers_from_mirror
+    assert_failure
+    assert_output_contains "-g<commit>"
+}
+
+@test "step 4 (linux-stable) is refused without a cached Valve tree" {
+    BM_ENTRIES=""
+    run bm_headers_from_stable
+    assert_failure
+    assert_output_contains "no cached Valve source"
+}
+
+@test "bm_trees_match: identical paths pass, a missing file (hid-asus-ally.c) or a changed byte fails" {
+    a="$BATS_TEST_TMPDIR/a" b="$BATS_TEST_TMPDIR/b"
+    mkdir -p "$a/sound/soc/amd" "$b/sound/soc/amd" "$a/drivers/hid" "$b/drivers/hid"
+    printf 'x' >"$a/sound/soc/amd/f.c"
+    printf 'x' >"$b/sound/soc/amd/f.c"
+    run bm_trees_match "$a" "$b" sound/soc/amd
+    assert_success
+    printf 'ally' >"$a/drivers/hid/hid-asus-ally.c"
+    run bm_trees_match "$a" "$b" sound/soc/amd drivers/hid
+    assert_failure
+    printf 'y' >"$b/sound/soc/amd/f.c"
+    run bm_trees_match "$a" "$b" sound/soc/amd
+    assert_failure
+}
+
+@test "symbol check: undefined symbols must be exported, CRCs must agree when versioned" {
+    sv="$BATS_TEST_TMPDIR/Module.symvers"
+    printf '0x00000000\thid_hw_start\tvmlinux\tEXPORT_SYMBOL_GPL\t\n0x12345678\tvalidate_mcu_fw_version\tdrivers/hid/hid-asus\tEXPORT_SYMBOL_GPL\t\n' >"$sv"
+    printf 'hid_hw_start\nvalidate_mcu_fw_version\n' >"$BATS_TEST_TMPDIR/undef"
+    : >"$BATS_TEST_TMPDIR/vers"
+    run bm_symbol_check "$BATS_TEST_TMPDIR/undef" "$BATS_TEST_TMPDIR/vers" "$sv"
+    assert_success
+    printf '0x12345678\tvalidate_mcu_fw_version\n' >"$BATS_TEST_TMPDIR/vers"
+    run bm_symbol_check "$BATS_TEST_TMPDIR/undef" "$BATS_TEST_TMPDIR/vers" "$sv"
+    assert_success
+    printf '0x87654321\tvalidate_mcu_fw_version\n' >"$BATS_TEST_TMPDIR/vers"
+    run bm_symbol_check "$BATS_TEST_TMPDIR/undef" "$BATS_TEST_TMPDIR/vers" "$sv"
+    assert_failure
+    assert_output_contains "CRC mismatch for validate_mcu_fw_version"
+    : >"$BATS_TEST_TMPDIR/vers"
+    printf 'hid_hw_start\nnot_exported_anywhere\n' >"$BATS_TEST_TMPDIR/undef"
+    run bm_symbol_check "$BATS_TEST_TMPDIR/undef" "$BATS_TEST_TMPDIR/vers" "$sv"
+    assert_failure
+    assert_output_contains "not_exported_anywhere"
+    # a symbol exported by a sibling module built in the same M= dir
+    printf '0x00000000\tnot_exported_anywhere\tdrivers/hid/hid-asus-ally\tEXPORT_SYMBOL\t\n' >"$BATS_TEST_TMPDIR/M.symvers"
+    run bm_symbol_check "$BATS_TEST_TMPDIR/undef" "$BATS_TEST_TMPDIR/vers" "$sv" "$BATS_TEST_TMPDIR/M.symvers"
+    assert_success
+}
+
+@test "bm_vermagic_ok compares the release word only" {
+    bm_vermagic_ok "$KVER SMP preempt mod_unload " "$KVER"
+    ! bm_vermagic_ok "7.2.7-valve2-1-neptune-72 SMP preempt mod_unload " "$KVER"
+    ! bm_vermagic_ok "" "$KVER"
+}
+
+# make_patch <tree> <path> <old> <new> <patch-file>
+make_patch() {
+    mkdir -p "$BATS_TEST_TMPDIR/pa/a/$(dirname "$2")" "$BATS_TEST_TMPDIR/pa/b/$(dirname "$2")"
+    printf '%s\n' "$3" >"$BATS_TEST_TMPDIR/pa/a/$2"
+    printf '%s\n' "$4" >"$BATS_TEST_TMPDIR/pa/b/$2"
+    (cd "$BATS_TEST_TMPDIR/pa" && diff -u "a/$2" "b/$2") >"$5" || true
+    rm -rf "$BATS_TEST_TMPDIR/pa"
+}
+
+@test "patches already in Valve's tree are skipped and their module marked superseded" {
+    command -v git >/dev/null 2>&1 || skip "git not installed"
+    write_lists
+    rm "$PATCHES_DIR/modules.list"
+    printf '0010-hid.patch\tdrivers/hid\thid-asus-ally.ko\n0011-hid.patch\tdrivers/hid\thid-asus-ally.ko\n' >"$PATCHES_DIR/modules-hid.list"
+    printf '0001-asoc.patch\tsound/soc/amd/acp\tsnd-soc-acpi-amd-match.ko\n' >"$PATCHES_DIR/modules.list"
+    make_patch t drivers/hid/hid-asus-ally.c 'old line' 'new line' "$PATCHES_DIR/0010-hid.patch"
+    make_patch t drivers/hid/hid-asus-ally.h 'h old' 'h new' "$PATCHES_DIR/0011-hid.patch"
+    make_patch t sound/soc/amd/acp/match.c 'no RC74XA' 'RC74XA entry' "$PATCHES_DIR/0001-asoc.patch"
+    BM_ENTRIES=$(bm_list_entries "$PATCHES_DIR")
+    tree="$BATS_TEST_TMPDIR/tree"
+    mkdir -p "$tree/drivers/hid" "$tree/sound/soc/amd/acp"
+    printf 'old line\n' >"$tree/drivers/hid/hid-asus-ally.c"
+    printf 'h old\n' >"$tree/drivers/hid/hid-asus-ally.h"
+    # Valve already carries the ASoC fix
+    printf 'RC74XA entry\n' >"$tree/sound/soc/amd/acp/match.c"
+    bm_apply_patches "$tree"
+    [ "$(cat "$tree/drivers/hid/hid-asus-ally.c")" = "new line" ]
+    [ "$(cat "$tree/drivers/hid/hid-asus-ally.h")" = "h new" ]
+    printf '%s' "$BM_PATCH_STATUS" | grep -qx '0001-asoc.patch already-upstream'
+    printf '%s' "$BM_PATCH_STATUS" | grep -qx '0010-hid.patch applied'
+    bm_is_superseded snd-soc-acpi-amd-match
+    ! bm_is_superseded hid-asus-ally
+    ! bm_mdir_needed sound/soc/amd/acp
+    bm_mdir_needed drivers/hid
+}
+
+@test "a patch that applies neither way fails the build" {
+    command -v git >/dev/null 2>&1 || skip "git not installed"
+    printf '0010-hid.patch\tdrivers/hid\thid-asus-ally.ko\n' >"$PATCHES_DIR/modules-hid.list"
+    make_patch t drivers/hid/hid-asus-ally.c 'old line' 'new line' "$PATCHES_DIR/0010-hid.patch"
+    BM_ENTRIES=$(bm_list_entries "$PATCHES_DIR")
+    tree="$BATS_TEST_TMPDIR/tree"
+    mkdir -p "$tree/drivers/hid"
+    printf 'something else\n' >"$tree/drivers/hid/hid-asus-ally.c"
+    run bm_apply_patches "$tree"
+    assert_failure
+    assert_output_contains "neither forward nor reverse"
+}
+
+@test "BUILD-INFO rendering records kver, vermagic, sources, patch and module hashes" {
+    write_lists
+    for p in 0001-asoc.patch 0002-acp.patch 0010-hid.patch 0011-hid.patch; do printf '%s\n' "$p" >"$PATCHES_DIR/$p"; done
+    BM_ENTRIES=$(bm_list_entries "$PATCHES_DIR")
+    out="$BATS_TEST_TMPDIR/out"
+    mkdir -p "$out"
+    printf 'ko' >"$out/hid-asus-ally.ko.zst"
+    BM_VERMAGIC="$KVER SMP preempt mod_unload "
+    BM_HEADER_SOURCE=2 BM_HEADER_DESC=valve-headers-package
+    BM_HEADER_URL=https://example/h.pkg.tar.zst BM_HEADER_SHA256=abc
+    BM_CHANNEL_USED=jupiter-main
+    BM_SOURCE_URL=https://github.com/evlaV/linux-integration.git
+    BM_SOURCE_REF=7.2.7-valve2@31504582a07316ae0e8a8fb3b8fdc39d94842816
+    BM_SOURCE_SHA256=""
+    BM_PATCH_STATUS="0001-asoc.patch already-upstream
+0002-acp.patch already-upstream
+0010-hid.patch applied
+0011-hid.patch applied
+"
+    BM_SUPERSEDED=" snd-acp-config snd-soc-acpi-amd-match"
+    SOF_COMMIT=0123abc BUILD_DATE=2026-10-30T00:00:00Z
+    CONTAINER_IMAGE=localhost/steamos-fixes-build CONTAINER_IMAGE_DIGEST=sha256:feed
+    bm_render_build_info "$out" >"$out/BUILD-INFO"
+    get() { SOF_SRC="$REPO_ROOT" bash -c '. "$1/lib/modules.sh"; modules_build_info_get "$2" "$3"' _ "$REPO_ROOT" "$out/BUILD-INFO" "$1"; }
+    [ "$(get kver)" = "$KVER" ]
+    [ "$(get vermagic)" = "$BM_VERMAGIC" ]
+    [ "$(get header_source)" = 2 ]
+    [ "$(get header_url)" = https://example/h.pkg.tar.zst ]
+    [ "$(get source_ref)" = 7.2.7-valve2@31504582a07316ae0e8a8fb3b8fdc39d94842816 ]
+    [ "$(get patch.0010-hid.patch)" = "$(bm_sha256 "$PATCHES_DIR/0010-hid.patch")" ]
+    [ "$(get patch.0001-asoc.patch.status)" = already-upstream ]
+    [ "$(get patch.0011-hid.patch.status)" = applied ]
+    [ "$(get module.hid-asus-ally)" = "$(bm_sha256 "$out/hid-asus-ally.ko.zst")" ]
+    [ "$(get module.snd-soc-acpi-amd-match)" = superseded ]
+    [ "$(get sof_commit)" = 0123abc ]
+    [ "$(get build_date)" = 2026-10-30T00:00:00Z ]
+    [ "$(get container_digest)" = sha256:feed ]
+}
+
+@test "bm_channels puts CHANNEL first without duplicates" {
+    CHANNEL=jupiter-rel
+    [ "$(bm_channels | tr '\n' ' ')" = "jupiter-rel jupiter-3.9 jupiter-main " ]
+}
+
+@test "bm_pkgbuild_tag reads _tag without sourcing the PKGBUILD" {
+    printf 'pkgbase=linux-neptune-72\n_tag=7.2.7-valve2\npkgver=${_tag//-/.}\n' >"$BATS_TEST_TMPDIR/PKGBUILD"
+    [ "$(bm_pkgbuild_tag "$BATS_TEST_TMPDIR/PKGBUILD")" = 7.2.7-valve2 ]
+}
+
+@test "bm_sparse_dirs keeps two path components for relative includes" {
+    write_lists
+    BM_ENTRIES=$(bm_list_entries "$PATCHES_DIR")
+    [ "$(bm_sparse_dirs | tr '\n' ' ')" = "drivers/hid sound/soc " ]
+}
+
+@test "bm_sparse_dirs adds the directories of patched include/ headers; bm_sparse_has checks a cached tree" {
+    write_lists
+    printf -- '--- a/include/sound/soc_sdw_utils.h\n+++ b/include/sound/soc_sdw_utils.h\n@@ -1 +1 @@\n-a\n+b\n' >"$PATCHES_DIR/0001-asoc.patch"
+    BM_ENTRIES=$(bm_list_entries "$PATCHES_DIR")
+    [ "$(bm_sparse_dirs | tr '\n' ' ')" = "drivers/hid include/sound sound/soc " ]
+    mkdir -p "$BATS_TEST_TMPDIR/sp"
+    printf 'url=u\nref=r\nsha256=\nsparse=drivers/hid sound/soc \n' >"$BATS_TEST_TMPDIR/sp/.sof-source"
+    ! bm_sparse_has "$BATS_TEST_TMPDIR/sp"
+    printf 'url=u\nref=r\nsha256=\nsparse=drivers/hid include/sound sound/soc \n' >"$BATS_TEST_TMPDIR/sp/.sof-source"
+    bm_sparse_has "$BATS_TEST_TMPDIR/sp"
+}
+
+@test "bm_tag_ge orders Valve tags numerically" {
+    bm_tag_ge 7.2.10-valve1 7.2.10-valve1
+    bm_tag_ge 7.2.10-valve2 7.2.10-valve1
+    bm_tag_ge 7.3-valve1 7.2.10-valve1
+    ! bm_tag_ge 7.2.7-valve2 7.2.10-valve1
+    ! bm_tag_ge 7.2.9-valve9 7.2.10-valve1
+    ! bm_tag_ge junk 7.2.10-valve1
+}
+
+@test "a Valve-Upstream tag marks a backport upstream on that tag and later, never earlier" {
+    command -v git >/dev/null 2>&1 || skip "git not installed"
+    printf '0004-tas.patch\tsound/soc/codecs\tsnd-soc-tas2783-sdw.ko\n' >"$PATCHES_DIR/modules.list"
+    make_patch t sound/soc/codecs/tas2783-sdw.c 'old line' 'new line' "$BATS_TEST_TMPDIR/body.diff"
+    printf 'From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001\nSubject: [PATCH] x\n\nValve-Upstream: 7.2.10-valve1\n---\n' >"$PATCHES_DIR/0004-tas.patch"
+    cat "$BATS_TEST_TMPDIR/body.diff" >>"$PATCHES_DIR/0004-tas.patch"
+    [ "$(bm_patch_valve_upstream "$PATCHES_DIR/0004-tas.patch")" = 7.2.10-valve1 ]
+    BM_ENTRIES=$(bm_list_entries "$PATCHES_DIR")
+    tree="$BATS_TEST_TMPDIR/tree"
+    mkdir -p "$tree/sound/soc/codecs"
+    # Valve's newer file: the backport neither applies nor reverse-applies
+    printf 'rewritten upstream\n' >"$tree/sound/soc/codecs/tas2783-sdw.c"
+    BM_TAG=7.2.10-valve1
+    [ "$(bm_patch_state "$tree" "$PATCHES_DIR/0004-tas.patch")" = upstream ]
+    bm_apply_patches "$tree"
+    bm_is_superseded snd-soc-tas2783-sdw
+    BM_TAG=7.2.7-valve2
+    [ "$(bm_patch_state "$tree" "$PATCHES_DIR/0004-tas.patch")" = conflict ]
+    printf 'old line\n' >"$tree/sound/soc/codecs/tas2783-sdw.c"
+    [ "$(bm_patch_state "$tree" "$PATCHES_DIR/0004-tas.patch")" = applies ]
+}
+
+@test "patched include/ headers go ahead of the kernel's; only the listed .ko files are built" {
+    command -v git >/dev/null 2>&1 || skip "git not installed"
+    printf '0003-x.patch\tsound/soc/sdw_utils\tsnd-soc-sdw-utils.ko\n0003-x.patch\tsound/soc/amd/acp\tsnd-acp-sdw-sof-mach.ko\n0003-x.patch\tsound/soc/amd/acp\tsnd-acp-sdw-legacy-mach.ko\n' >"$PATCHES_DIR/modules.list"
+    make_patch t include/sound/soc_sdw_utils.h 'struct old' 'struct new' "$BATS_TEST_TMPDIR/h.diff"
+    make_patch t sound/soc/sdw_utils/soc_sdw_utils.c 'c old' 'c new' "$BATS_TEST_TMPDIR/c.diff"
+    cat "$BATS_TEST_TMPDIR/h.diff" "$BATS_TEST_TMPDIR/c.diff" >"$PATCHES_DIR/0003-x.patch"
+    BM_ENTRIES=$(bm_list_entries "$PATCHES_DIR")
+    tree="$BATS_TEST_TMPDIR/tree"
+    mkdir -p "$tree/include/sound" "$tree/sound/soc/sdw_utils" "$tree/sound/soc/amd/acp"
+    printf 'struct old\n' >"$tree/include/sound/soc_sdw_utils.h"
+    printf 'c old\n' >"$tree/sound/soc/sdw_utils/soc_sdw_utils.c"
+    BM_TAG=7.2.7-valve2 BM_HEADERS_DIR=/hdr JOBS=2
+    bm_apply_patches "$tree"
+    [ "$BM_INCLUDE_OVERLAY" = "$tree.include" ]
+    [ "$(cat "$tree.include/sound/soc_sdw_utils.h")" = "struct new" ]
+    [ "$(bm_make_args "$tree" sound/soc/amd/acp | tr '\n' '|')" = "-C|/hdr|M=$tree/sound/soc/amd/acp|-j2|NOSTDINC_FLAGS=-nostdinc -I$tree.include|snd-acp-sdw-legacy-mach.ko|snd-acp-sdw-sof-mach.ko|" ]
+    bm_make() { printf '%s\n' "$@" >>"$BATS_TEST_TMPDIR/make.log"; }
+    bm_build_mdirs "$tree"
+    grep -qx "M=$tree/sound/soc/sdw_utils" "$BATS_TEST_TMPDIR/make.log"
+    grep -qx 'snd-soc-sdw-utils.ko' "$BATS_TEST_TMPDIR/make.log"
+    [ "$(grep -c '^NOSTDINC_FLAGS=' "$BATS_TEST_TMPDIR/make.log")" -eq 2 ]
+}
+
+@test "without a patched header no NOSTDINC_FLAGS are passed" {
+    printf '0010-hid.patch\tdrivers/hid\thid-asus-ally.ko\n' >"$PATCHES_DIR/modules-hid.list"
+    BM_ENTRIES=$(bm_list_entries "$PATCHES_DIR")
+    BM_INCLUDE_OVERLAY="" BM_SUPERSEDED="" BM_HEADERS_DIR=/hdr JOBS=1
+    [ "$(bm_make_args /t drivers/hid | tr '\n' '|')" = "-C|/hdr|M=/t/drivers/hid|-j1|hid-asus-ally.ko|" ]
+}
