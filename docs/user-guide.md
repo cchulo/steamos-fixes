@@ -77,11 +77,12 @@ The installer copies the project to `/var/lib/steamos-fixes/src` and runs
 everything from there; you can delete the clone afterwards.
 
 How long it takes: **a few minutes** when a prebuilt driver exists for your
-kernel (each release carries one for the kernels it supports); **a long
-time** (the whole amdgpu driver is compiled in a container) when there is
-none, for example right after a SteamOS update with a brand-new kernel. In
-that case the fix stays `degraded` (your HDMI link runs as before) until the
-build finishes and you reboot once more.
+kernel (each release carries one for the kernels it supports; CI builds it
+in about 8 minutes); **longer** when there is none and the machine compiles
+the whole amdgpu driver itself in a container, for example right after a
+SteamOS update with a brand-new kernel. In that case the fix stays
+`degraded` (your HDMI link runs as before) until the build finishes and you
+reboot once more.
 
 When it finishes it prints a status table. **Reboot** when it tells you to,
 then go back to Game Mode.

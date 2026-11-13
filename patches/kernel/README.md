@@ -50,15 +50,16 @@ Machine with an LG C4 (40-144 Hz VRR at 4K144 10-bit 4:4:4), by
 applies neither forward nor in reverse there; the `Valve-Upstream:
 7.2.10-valve1` line in its description tells `build-modules.sh` to treat it
 as already upstream on that tag and later, record `module.amdgpu=superseded`
-and ship nothing. The patch has not been compiled on a dev host or run on
-hardware yet (plan §7).
+and ship nothing (confirmed by CI on 2026-11-13: `7.2.10-valve1-3` →
+`already-upstream`, `module.amdgpu=superseded`; `7.2.7-valve2-2` and `-3`
+→ `applied`, vermagic matching). Not yet run on hardware (plan §7).
 
 **Why the whole module:** `amdgpu.ko` is one module built from
 `drivers/gpu/drm/amd/amdgpu`, whose Makefile also compiles the display code
 under `drivers/gpu/drm/amd/display`. The build's scope rule allows a patch
 to touch the parent of its `M=` directory for that reason. The build is the
-complete driver, which takes a long time in CI and longer on the device;
-the release asset is the normal path.
+complete driver: 8 minutes on a GitHub runner (measured), `amdgpu.ko.zst`
+5.6 MB; the release asset is the normal path.
 
 **Related, not shipped:** beaglemoo's `0002` (re-verify the FRL link on
 every hotplug, mainline `c953b39f9487`; without it the link drops to TMDS

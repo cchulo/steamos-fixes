@@ -87,7 +87,8 @@ For a kernel version, the sources are tried in this order:
    release (the release matching the checkout's `VERSION` first, then
    `latest`), checked against its `.sha256`;
 3. **container**: a local build in the Arch container with podman (needs a
-   network connection; the whole amdgpu driver takes a long time).
+   network connection; the whole amdgpu driver takes about 8 minutes on a
+   CI runner, longer on a small machine).
 
 This runs from `install`, from the RAUC post-install hook for the new
 slot's kernel, and from the boot service when the running kernel has no

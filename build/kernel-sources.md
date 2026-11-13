@@ -224,8 +224,8 @@ while no `patches/kernel/modules*.list` exists.
 |---|---|---|
 | step 2 headers package | 90 MB download, 320 MB unpacked | ~1 min |
 | sparse Valve checkout of the M= dirs | tens of MB | <1 min |
-| `make` of the listed `.ko` files (single targets) | | a few minutes; the whole amdgpu driver: tens of minutes to over an hour |
+| `make` of the listed `.ko` files (single targets) | | the whole amdgpu driver: 8 min on a GitHub `ubuntu-latest` runner (measured 2026-11-13, headers from the mirror, sparse checkout of `drivers/gpu`); `amdgpu.ko.zst` 5.6 MB (36 MB unpacked) |
 | step 3 via the `.src.tar.gz` | 3.4 GB download, ~8 GB unpacked | long |
 | step 3 full kernel build for Module.symvers | ~15 GB | 20-60 min |
 
-TODO(hw): measure these on the Steam Machine and in CI.
+TODO(hw): measure the on-device container build on the Steam Machine.

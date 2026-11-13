@@ -141,8 +141,9 @@ Details: [update-survival.md](../update-survival.md).
 - The patched module is unsigned: the kernel is tainted (`O`, `E`).
 - Kernel lockdown (`integrity`/`confidentiality`) must be inactive; Valve's
   kernels ship `LOCK_DOWN_KERNEL_FORCE_NONE`.
-- An on-device rebuild needs network, podman and a second reboot, and the
-  full amdgpu build takes a long time; prefer the release asset.
+- An on-device rebuild needs network, podman and a second reboot, and
+  compiles the whole amdgpu driver (8 minutes on a CI runner); prefer the
+  release asset.
 - What is actually driven (bpc, mode) is gamescope's choice through the
   connector's `max bpc`; the fix only makes the link capable of it.
 
