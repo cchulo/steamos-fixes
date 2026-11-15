@@ -1,5 +1,12 @@
 # steamos-fixes
 
+> **Archived.** SteamOS 3.10 ships the HDMI 2.1 FRL and VRR fixes this
+> project carried out of tree, so it is no longer needed. The repository is
+> read-only and will not be updated. If you still have it installed, update
+> to SteamOS 3.10 and remove it with `sudo ./steamos-fixes.sh uninstall`
+> from `/var/lib/steamos-fixes/src` (or run `uninstall/uninstall.sh`). The
+> `hdmi-frl` fix also retires itself when it sees the newer kernel.
+
 Out-of-tree fixes for **stock SteamOS** (stable channel) that Valve has not
 shipped yet. Built from source, surviving SteamOS A/B updates, fully
 reversible, and hardware-agnostic: every fix declares which hardware it is
